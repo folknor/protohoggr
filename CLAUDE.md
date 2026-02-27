@@ -5,13 +5,13 @@ Extracted from [pbfhogg](https://github.com/folknor/pbfhogg) (OpenStreetMap PBF 
 
 ## Project structure
 
-Single-library crate. All code lives in `src/lib.rs` (~970 lines including tests).
+Single-library crate. Implementation in `src/lib.rs`, integration tests in `tests/wire.rs`.
 
 ## Build & test
 
 ```sh
 cargo build        # build
-cargo test         # run all tests (28 unit tests)
+cargo test         # run all tests (78 integration tests)
 cargo clippy       # lint — must pass clean
 ```
 
@@ -20,7 +20,7 @@ cargo clippy       # lint — must pass clean
 - Rust 2024 edition, nightly toolchain
 - No external dependencies — pure Rust, std only
 - Very strict clippy: 30+ lints set to `deny` in `Cargo.toml` under `[lints.clippy]`
-  - `unwrap_used` is denied in non-test code (also enforced via `#![deny(clippy::unwrap_used)]`)
+  - `unwrap_used` is denied — enforced via `Cargo.toml`
   - `cast_sign_loss`, `cast_possible_truncation`, `cast_possible_wrap` are denied — use `#[allow(...)]` locally with care
   - `cognitive_complexity` and `too_many_lines` are denied — keep functions small
 - Test module uses `#[allow(clippy::unwrap_used)]` so `.unwrap()` is fine in tests

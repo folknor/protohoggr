@@ -549,8 +549,7 @@ fn packed_int32_encode_decode_roundtrip() {
 fn packed_bool_encode_decode_roundtrip() {
     let values = [true, false, true, true, false];
     let mut buf = Vec::new();
-    let mut scratch = Vec::new();
-    encode_packed_bool(&mut buf, &mut scratch, 5, &values);
+    encode_packed_bool(&mut buf, 5, &values);
 
     let mut c = Cursor::new(&buf);
     let (field, wt) = c.read_tag().unwrap().unwrap();
@@ -667,4 +666,220 @@ fn multi_field_message_roundtrip() {
     assert_eq!(c.read_sint64().unwrap(), -12345);
 
     assert!(c.read_tag().unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Cursor: position
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cursor_position() {
+    let data = [0x08, 0xAC, 0x02]; // tag + 2-byte varint
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.position(), 0);
+    let _ = c.read_tag().unwrap();
+    assert_eq!(c.position(), 1);
+    let _ = c.read_varint().unwrap();
+    assert_eq!(c.position(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Cursor: fixed-width readers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn read_fixed32() {
+    let data = 42u32.to_le_bytes();
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_fixed32().unwrap(), 42);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn read_fixed64() {
+    let data = 123456789u64.to_le_bytes();
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_fixed64().unwrap(), 123456789);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn read_fixed32_truncated() {
+    let mut c = Cursor::new(&[0x01, 0x02]);
+    assert!(c.read_fixed32().is_err());
+}
+
+#[test]
+fn read_fixed64_truncated() {
+    let mut c = Cursor::new(&[0x01, 0x02, 0x03, 0x04]);
+    assert!(c.read_fixed64().is_err());
+}
+
+#[test]
+fn read_float() {
+    let val: f32 = 3.14;
+    let data = val.to_le_bytes();
+    let mut c = Cursor::new(&data);
+    let decoded = c.read_float().unwrap();
+    assert!((decoded - val).abs() < f32::EPSILON);
+}
+
+#[test]
+fn read_double() {
+    let val: f64 = 2.718281828;
+    let data = val.to_le_bytes();
+    let mut c = Cursor::new(&data);
+    let decoded = c.read_double().unwrap();
+    assert!((decoded - val).abs() < f64::EPSILON);
+}
+
+// ---------------------------------------------------------------------------
+// Encode: sint skip-zero variants
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sint64_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_sint64_field(&mut buf, 1, 0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn sint64_field_nonzero() {
+    let mut buf = Vec::new();
+    encode_sint64_field(&mut buf, 1, -1);
+    assert_eq!(buf, [0x08, 0x01]); // zigzag(-1) = 1
+}
+
+#[test]
+fn sint32_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_sint32_field(&mut buf, 1, 0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn sint32_field_nonzero() {
+    let mut buf = Vec::new();
+    encode_sint32_field(&mut buf, 1, -2);
+    assert_eq!(buf, [0x08, 0x03]); // zigzag(-2) = 3
+}
+
+#[test]
+fn sint32_field_always_writes_zero() {
+    let mut buf = Vec::new();
+    encode_sint32_field_always(&mut buf, 1, 0);
+    assert_eq!(buf, [0x08, 0x00]);
+}
+
+#[test]
+fn sint32_field_encode_decode_roundtrip() {
+    for value in [0i32, 1, -1, 100, -100, i32::MAX, i32::MIN] {
+        let mut buf = Vec::new();
+        encode_sint32_field_always(&mut buf, 3, value);
+
+        let mut c = Cursor::new(&buf);
+        let (field, wt) = c.read_tag().unwrap().unwrap();
+        assert_eq!(field, 3);
+        assert_eq!(wt, WIRE_VARINT);
+        let decoded = c.read_sint32().unwrap();
+        assert_eq!(decoded, value, "roundtrip failed for {value}");
+        assert!(c.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Encode: fixed-width field encoders
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixed32_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_fixed32_field(&mut buf, 1, 0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn fixed32_field_encode_decode_roundtrip() {
+    for value in [0u32, 1, 42, u32::MAX] {
+        let mut buf = Vec::new();
+        encode_fixed32_field_always(&mut buf, 1, value);
+
+        let mut c = Cursor::new(&buf);
+        let (field, wt) = c.read_tag().unwrap().unwrap();
+        assert_eq!(field, 1);
+        assert_eq!(wt, WIRE_32BIT);
+        let decoded = c.read_fixed32().unwrap();
+        assert_eq!(decoded, value, "roundtrip failed for {value}");
+        assert!(c.is_empty());
+    }
+}
+
+#[test]
+fn fixed64_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_fixed64_field(&mut buf, 1, 0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn fixed64_field_encode_decode_roundtrip() {
+    for value in [0u64, 1, 123456789, u64::MAX] {
+        let mut buf = Vec::new();
+        encode_fixed64_field_always(&mut buf, 2, value);
+
+        let mut c = Cursor::new(&buf);
+        let (field, wt) = c.read_tag().unwrap().unwrap();
+        assert_eq!(field, 2);
+        assert_eq!(wt, WIRE_64BIT);
+        let decoded = c.read_fixed64().unwrap();
+        assert_eq!(decoded, value, "roundtrip failed for {value}");
+        assert!(c.is_empty());
+    }
+}
+
+#[test]
+fn float_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_float_field(&mut buf, 1, 0.0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn float_field_encode_decode_roundtrip() {
+    for value in [0.0f32, 1.0, -1.0, 3.14, f32::MAX, f32::MIN] {
+        let mut buf = Vec::new();
+        encode_float_field_always(&mut buf, 4, value);
+
+        let mut c = Cursor::new(&buf);
+        let (field, wt) = c.read_tag().unwrap().unwrap();
+        assert_eq!(field, 4);
+        assert_eq!(wt, WIRE_32BIT);
+        let decoded = c.read_float().unwrap();
+        assert_eq!(decoded.to_bits(), value.to_bits(), "roundtrip failed for {value}");
+        assert!(c.is_empty());
+    }
+}
+
+#[test]
+fn double_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_double_field(&mut buf, 1, 0.0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn double_field_encode_decode_roundtrip() {
+    for value in [0.0f64, 1.0, -1.0, 2.718281828, f64::MAX, f64::MIN] {
+        let mut buf = Vec::new();
+        encode_double_field_always(&mut buf, 5, value);
+
+        let mut c = Cursor::new(&buf);
+        let (field, wt) = c.read_tag().unwrap().unwrap();
+        assert_eq!(field, 5);
+        assert_eq!(wt, WIRE_64BIT);
+        let decoded = c.read_double().unwrap();
+        assert_eq!(decoded.to_bits(), value.to_bits(), "roundtrip failed for {value}");
+        assert!(c.is_empty());
+    }
 }

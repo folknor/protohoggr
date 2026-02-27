@@ -76,6 +76,12 @@ impl<'a> Cursor<'a> {
         self.data.len().saturating_sub(self.pos)
     }
 
+    /// Current byte offset within the underlying slice.
+    #[inline]
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
     /// Read a varint (LEB128). Fast path for single-byte values.
     #[inline]
     pub fn read_varint(&mut self) -> WireResult<u64> {
@@ -132,6 +138,46 @@ impl<'a> Cursor<'a> {
     pub fn read_sint32(&mut self) -> WireResult<i32> {
         let v = self.read_varint()?;
         Ok(zigzag_decode_32(v))
+    }
+
+    /// Read a little-endian 32-bit fixed-width value.
+    #[inline]
+    pub fn read_fixed32(&mut self) -> WireResult<u32> {
+        if self.pos + 4 > self.data.len() {
+            return Err(wire_error("unexpected end of input reading fixed32"));
+        }
+        let bytes: [u8; 4] = [
+            self.data[self.pos],
+            self.data[self.pos + 1],
+            self.data[self.pos + 2],
+            self.data[self.pos + 3],
+        ];
+        self.pos += 4;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Read a little-endian 64-bit fixed-width value.
+    #[inline]
+    pub fn read_fixed64(&mut self) -> WireResult<u64> {
+        if self.pos + 8 > self.data.len() {
+            return Err(wire_error("unexpected end of input reading fixed64"));
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.data[self.pos..self.pos + 8]);
+        self.pos += 8;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// Read a little-endian `float` (32-bit IEEE 754).
+    #[inline]
+    pub fn read_float(&mut self) -> WireResult<f32> {
+        Ok(f32::from_bits(self.read_fixed32()?))
+    }
+
+    /// Read a little-endian `double` (64-bit IEEE 754).
+    #[inline]
+    pub fn read_double(&mut self) -> WireResult<f64> {
+        Ok(f64::from_bits(self.read_fixed64()?))
     }
 
     /// Read a (field_number, wire_type) tag. Returns None at EOF.
@@ -300,6 +346,16 @@ impl<'a> PackedSint64Iter<'a> {
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn remaining_bytes(&self) -> usize {
+        self.0.remaining_bytes()
+    }
 }
 
 impl Iterator for PackedSint64Iter<'_> {
@@ -324,6 +380,21 @@ impl<'a> PackedSint32Iter<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self(PackedIter::empty())
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn remaining_bytes(&self) -> usize {
+        self.0.remaining_bytes()
+    }
 }
 
 impl Iterator for PackedSint32Iter<'_> {
@@ -347,6 +418,21 @@ impl<'a> PackedInt64Iter<'a> {
     #[inline]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
+    }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self(PackedIter::empty())
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn remaining_bytes(&self) -> usize {
+        self.0.remaining_bytes()
     }
 }
 
@@ -418,6 +504,16 @@ impl<'a> PackedUint32Iter<'a> {
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn remaining_bytes(&self) -> usize {
+        self.0.remaining_bytes()
+    }
 }
 
 impl Iterator for PackedUint32Iter<'_> {
@@ -442,6 +538,21 @@ impl<'a> PackedBoolIter<'a> {
     #[inline]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
+    }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self(PackedIter::empty())
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn remaining_bytes(&self) -> usize {
+        self.0.remaining_bytes()
     }
 }
 
@@ -611,11 +722,100 @@ pub fn encode_bytes_field_always(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
     buf.extend_from_slice(data);
 }
 
-/// Encode a `sint64` field, always written even if zero.
+/// Encode a `sint64` field. Skips if `value == 0`.
+#[inline]
+pub fn encode_sint64_field(buf: &mut Vec<u8>, field: u32, value: i64) {
+    if value != 0 {
+        encode_tag(buf, field, WIRE_VARINT);
+        encode_varint(buf, zigzag_encode_64(value));
+    }
+}
+
+/// Encode a `sint64` field unconditionally (even if zero).
 #[inline]
 pub fn encode_sint64_field_always(buf: &mut Vec<u8>, field: u32, value: i64) {
     encode_tag(buf, field, WIRE_VARINT);
     encode_varint(buf, zigzag_encode_64(value));
+}
+
+/// Encode a `sint32` field. Skips if `value == 0`.
+#[inline]
+pub fn encode_sint32_field(buf: &mut Vec<u8>, field: u32, value: i32) {
+    if value != 0 {
+        encode_tag(buf, field, WIRE_VARINT);
+        encode_varint(buf, zigzag_encode_32(value));
+    }
+}
+
+/// Encode a `sint32` field unconditionally (even if zero).
+#[inline]
+pub fn encode_sint32_field_always(buf: &mut Vec<u8>, field: u32, value: i32) {
+    encode_tag(buf, field, WIRE_VARINT);
+    encode_varint(buf, zigzag_encode_32(value));
+}
+
+/// Encode a `fixed32` field. Skips if `value == 0`.
+#[inline]
+pub fn encode_fixed32_field(buf: &mut Vec<u8>, field: u32, value: u32) {
+    if value != 0 {
+        encode_tag(buf, field, WIRE_32BIT);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Encode a `fixed32` field unconditionally (even if zero).
+#[inline]
+pub fn encode_fixed32_field_always(buf: &mut Vec<u8>, field: u32, value: u32) {
+    encode_tag(buf, field, WIRE_32BIT);
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Encode a `fixed64` field. Skips if `value == 0`.
+#[inline]
+pub fn encode_fixed64_field(buf: &mut Vec<u8>, field: u32, value: u64) {
+    if value != 0 {
+        encode_tag(buf, field, WIRE_64BIT);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Encode a `fixed64` field unconditionally (even if zero).
+#[inline]
+pub fn encode_fixed64_field_always(buf: &mut Vec<u8>, field: u32, value: u64) {
+    encode_tag(buf, field, WIRE_64BIT);
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Encode a `float` field. Skips if `value == 0.0`.
+#[inline]
+pub fn encode_float_field(buf: &mut Vec<u8>, field: u32, value: f32) {
+    if value.to_bits() != 0 {
+        encode_tag(buf, field, WIRE_32BIT);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Encode a `float` field unconditionally (even if zero).
+#[inline]
+pub fn encode_float_field_always(buf: &mut Vec<u8>, field: u32, value: f32) {
+    encode_tag(buf, field, WIRE_32BIT);
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Encode a `double` field. Skips if `value == 0.0`.
+#[inline]
+pub fn encode_double_field(buf: &mut Vec<u8>, field: u32, value: f64) {
+    if value.to_bits() != 0 {
+        encode_tag(buf, field, WIRE_64BIT);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Encode a `double` field unconditionally (even if zero).
+#[inline]
+pub fn encode_double_field_always(buf: &mut Vec<u8>, field: u32, value: f64) {
+    encode_tag(buf, field, WIRE_64BIT);
+    buf.extend_from_slice(&value.to_le_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -692,19 +892,18 @@ pub fn encode_packed_sint32(
 }
 
 /// Encode a packed repeated `bool` field.
-pub fn encode_packed_bool(
-    buf: &mut Vec<u8>,
-    scratch: &mut Vec<u8>,
-    field: u32,
-    values: &[bool],
-) {
+///
+/// Bools are always exactly 1 byte on the wire, so this skips the scratch
+/// buffer and writes directly — length is just `values.len()`.
+#[allow(clippy::cast_possible_truncation)]
+pub fn encode_packed_bool(buf: &mut Vec<u8>, field: u32, values: &[bool]) {
     if values.is_empty() {
         return;
     }
-    scratch.clear();
+    encode_tag(buf, field, WIRE_LEN);
+    encode_varint(buf, values.len() as u64);
     for &v in values {
-        encode_varint(scratch, u64::from(v));
+        buf.push(u8::from(v));
     }
-    encode_bytes_field(buf, field, scratch);
 }
 
