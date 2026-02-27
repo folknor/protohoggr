@@ -1,1 +1,7 @@
-/target
+target
+Cargo.lock
+.*.swp
+.*.swo
+.idea
+.plans/
+data

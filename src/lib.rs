@@ -511,6 +511,13 @@ pub fn encode_varint_field(buf: &mut Vec<u8>, field: u32, value: u64) {
     }
 }
 
+/// Encode a varint field unconditionally (even if zero).
+#[inline]
+pub fn encode_varint_field_always(buf: &mut Vec<u8>, field: u32, value: u64) {
+    encode_tag(buf, field, WIRE_VARINT);
+    encode_varint(buf, value);
+}
+
 /// Encode an `int64` field. Skips if `value == 0`.
 ///
 /// Negative `i64` values encode as 10-byte varints (sign-extension).
@@ -521,6 +528,14 @@ pub fn encode_int64_field(buf: &mut Vec<u8>, field: u32, value: i64) {
         encode_tag(buf, field, WIRE_VARINT);
         encode_varint(buf, value as u64);
     }
+}
+
+/// Encode an `int64` field unconditionally (even if zero).
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+pub fn encode_int64_field_always(buf: &mut Vec<u8>, field: u32, value: i64) {
+    encode_tag(buf, field, WIRE_VARINT);
+    encode_varint(buf, value as u64);
 }
 
 /// Encode an `int32` field. Skips if `value == 0`.
@@ -536,6 +551,14 @@ pub fn encode_int32_field(buf: &mut Vec<u8>, field: u32, value: i32) {
     }
 }
 
+/// Encode an `int32` field unconditionally (even if zero).
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn encode_int32_field_always(buf: &mut Vec<u8>, field: u32, value: i32) {
+    encode_tag(buf, field, WIRE_VARINT);
+    encode_varint(buf, value as i64 as u64);
+}
+
 /// Encode a `uint32` field. Skips if `value == 0`.
 #[inline]
 pub fn encode_uint32_field(buf: &mut Vec<u8>, field: u32, value: u32) {
@@ -545,6 +568,13 @@ pub fn encode_uint32_field(buf: &mut Vec<u8>, field: u32, value: u32) {
     }
 }
 
+/// Encode a `uint32` field unconditionally (even if zero).
+#[inline]
+pub fn encode_uint32_field_always(buf: &mut Vec<u8>, field: u32, value: u32) {
+    encode_tag(buf, field, WIRE_VARINT);
+    encode_varint(buf, u64::from(value));
+}
+
 /// Encode a `bool` field. Skips if `value == false`.
 #[inline]
 pub fn encode_bool_field(buf: &mut Vec<u8>, field: u32, value: bool) {
@@ -552,6 +582,13 @@ pub fn encode_bool_field(buf: &mut Vec<u8>, field: u32, value: bool) {
         encode_tag(buf, field, WIRE_VARINT);
         buf.push(1);
     }
+}
+
+/// Encode a `bool` field unconditionally (even if false).
+#[inline]
+pub fn encode_bool_field_always(buf: &mut Vec<u8>, field: u32, value: bool) {
+    encode_tag(buf, field, WIRE_VARINT);
+    buf.push(u8::from(value));
 }
 
 /// Encode a length-delimited field (bytes, submessage, packed repeated).
@@ -937,6 +974,50 @@ mod tests {
         encode_bytes_field(&mut buf, 1, b"hello");
         assert_eq!(&buf[..2], &[0x0a, 0x05]);
         assert_eq!(&buf[2..], b"hello");
+    }
+
+    // -- encode: field-level _always variants --
+
+    #[test]
+    fn varint_field_always_writes_zero() {
+        let mut buf = Vec::new();
+        encode_varint_field_always(&mut buf, 1, 0);
+        assert_eq!(buf, [0x08, 0x00]);
+    }
+
+    #[test]
+    fn int64_field_always_writes_zero() {
+        let mut buf = Vec::new();
+        encode_int64_field_always(&mut buf, 1, 0);
+        assert_eq!(buf, [0x08, 0x00]);
+    }
+
+    #[test]
+    fn int32_field_always_writes_zero() {
+        let mut buf = Vec::new();
+        encode_int32_field_always(&mut buf, 1, 0);
+        assert_eq!(buf, [0x08, 0x00]);
+    }
+
+    #[test]
+    fn uint32_field_always_writes_zero() {
+        let mut buf = Vec::new();
+        encode_uint32_field_always(&mut buf, 5, 0);
+        assert_eq!(buf, [0x28, 0x00]);
+    }
+
+    #[test]
+    fn bool_field_always_writes_false() {
+        let mut buf = Vec::new();
+        encode_bool_field_always(&mut buf, 6, false);
+        assert_eq!(buf, [0x30, 0x00]);
+    }
+
+    #[test]
+    fn bool_field_always_writes_true() {
+        let mut buf = Vec::new();
+        encode_bool_field_always(&mut buf, 6, true);
+        assert_eq!(buf, [0x30, 0x01]);
     }
 
     // -- encode: packed repeated --
