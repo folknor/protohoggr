@@ -83,6 +83,14 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read a varint (LEB128). Fast path for single-byte values.
+    ///
+    /// This scalar implementation intentionally does NOT use SIMD. Benchmarked
+    /// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSSE3): scalar is
+    /// 2.3× faster than SIMD batch4 decode for 1-byte varints (the dominant
+    /// OSM case — dense node id/lat/lon deltas) and tied for 3-byte varints.
+    /// The 1-byte fast path below is perfectly predicted by the CPU branch
+    /// predictor, beating SSE shuffle + mask overhead. See `notes/SIMD.md` in
+    /// pbfhogg (dd7f69a) for the full research doc (P3-20, closed).
     #[inline]
     pub fn read_varint(&mut self) -> WireResult<u64> {
         if self.pos >= self.data.len() {
@@ -575,6 +583,11 @@ impl Iterator for PackedBoolIter<'_> {
 // ---------------------------------------------------------------------------
 
 /// Encode a `u64` as a variable-length integer (LEB128) into `buf`.
+///
+/// This scalar implementation intentionally does NOT use SIMD. Benchmarked
+/// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSE2): scalar is
+/// 3.5× faster for 1-byte varints and 1.5× faster for 3-byte varints.
+/// See `notes/SIMD.md` in pbfhogg (dd7f69a) (P3-20, closed).
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
