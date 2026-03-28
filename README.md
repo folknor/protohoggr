@@ -4,6 +4,9 @@ Zero-copy protobuf wire-format primitives for Rust. No external dependencies.
 
 Extracted from [pbfhogg](https://github.com/folknor/pbfhogg), an OpenStreetMap PBF reader/writer.
 
+Built with LLMs. See [LLM.md](LLM.md).
+
+
 ## What's in the box
 
 - **Cursor** — zero-copy reader over a byte slice: varints (LEB128), zigzag-decoded sint32/sint64, tags, length-delimited fields, field skipping
