@@ -26,7 +26,8 @@
     clippy::cast_possible_wrap
 )]
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use protohoggr::{
     PackedSint64Iter, encode_packed_sint64, zigzag_decode_64, zigzag_encode_64,
 };

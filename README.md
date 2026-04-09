@@ -36,4 +36,4 @@ encode_bytes_field(&mut buf, 1, b"hello");
 
 ## License
 
-Apache-2.0
+Apache-2.0 or MIT.
