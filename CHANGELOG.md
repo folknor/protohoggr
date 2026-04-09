@@ -1,0 +1,22 @@
+# Changelog
+
+## 0.2.0
+
+First standalone release, extracted from [pbfhogg](https://github.com/folknor/pbfhogg).
+
+### Decoding
+- `Cursor` — zero-copy reader over `&[u8]`: varints (LEB128), zigzag sint64/sint32, tags, length-delimited fields, fixed32/fixed64, float/double, skip, position tracking
+- `PackedIter` — base packed varint iterator yielding raw `u64`
+- Typed packed iterators: `PackedSint64Iter`, `PackedSint32Iter`, `PackedInt64Iter`, `PackedInt32Iter`, `PackedUint32Iter`, `PackedBoolIter`
+- All packed iterators expose `new()`, `empty()`, `is_empty()`, `remaining_bytes()`
+
+### Encoding
+- `encode_varint` (LEB128), `zigzag_encode_64`, `zigzag_encode_32`
+- Field encoders (skip-zero by default, `_always` variants write unconditionally):
+  varint, int64, int32, uint32, bool, bytes, sint64, sint32, fixed32, fixed64, float, double
+- Packed repeated encoders: uint32, int32, sint64, sint32, bool
+
+### Other
+- Zero external dependencies — pure Rust, std only
+- Dual-licensed MIT OR Apache-2.0
+- Benchmarked scalar vs varint-simd SSSE3/SSE2 — scalar wins 2–6× on decode, 1.5–3.5× on encode

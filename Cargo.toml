@@ -2,9 +2,14 @@
 name = "protohoggr"
 version = "0.2.0"
 description = "Zero-copy protobuf wire-format primitives: varint, zigzag, cursor-based decoder, field encoders, packed repeated fields."
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["folknor <folk@folk.wtf>"]
+readme = "README.md"
 repository = "https://github.com/folknor/protohoggr"
+keywords = ["protobuf", "varint", "wire-format", "encoding", "decoding"]
+categories = ["encoding", "parser-implementations"]
 
 [lints.clippy]
 uninlined_format_args = "deny"
