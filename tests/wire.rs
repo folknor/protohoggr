@@ -1551,6 +1551,42 @@ fn cumulative_wrapping() {
     assert_eq!(out[0], i64::MIN);
 }
 
+#[test]
+fn cumulative_stops_on_overflow_varint() {
+    // A valid varint [0x01] followed by a 10-byte varint whose final byte is
+    // 0x02 (overflows u64 — read_varint rejects this, PackedIter stops).
+    // The batch decoder must also stop and not append the overflowing value.
+    let mut data = vec![0x02]; // zigzag(2) = 1, so delta = 1
+    // 9 continuation bytes (0xFF) + final byte 0x02 (overflow: 10th byte > 1)
+    data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]);
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&data, 0, &mut out);
+    // Only the first valid varint should be decoded; the overflowing one stops iteration.
+    assert_eq!(out, vec![1]);
+}
+
+#[test]
+fn cumulative_stops_matches_packed_iter_on_overflow() {
+    // Verify that the batch decoder and PackedSint64Iter produce the same
+    // output when the packed body ends with an overflowing varint.
+    let mut data = vec![0x04, 0x06]; // zigzag(2)=4, zigzag(3)=6 → deltas 2, 3
+    // Append overflowing 10-byte varint.
+    data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]);
+    data.push(0x02); // Another valid varint that should NOT be reached.
+
+    // PackedSint64Iter behavior: collect decoded values.
+    let iter_values: Vec<i64> = PackedSint64Iter::new(&data).collect();
+
+    // Batch decoder with base=0, cumulative.
+    let mut batch_out = Vec::new();
+    decode_packed_sint64_cumulative(&data, 0, &mut batch_out);
+
+    // The iter yields [2, 3] then stops at the overflow. The batch decoder
+    // yields cumulative [2, 5] then stops at the same point.
+    assert_eq!(iter_values, vec![2, 3]);
+    assert_eq!(batch_out, vec![2, 5]);
+}
+
 // ---------------------------------------------------------------------------
 // encode_varint_to_slice
 // ---------------------------------------------------------------------------

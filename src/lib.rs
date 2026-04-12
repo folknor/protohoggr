@@ -139,11 +139,13 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Read a varint (LEB128) without bounds checks. Infallible.
+    /// Read a varint (LEB128) without bounds or validity checks. Infallible.
     ///
-    /// This is the unchecked counterpart to [`read_varint`](Cursor::read_varint)
-    /// for use inside validated length-delimited regions where all varints are
-    /// known to be complete and well-formed.
+    /// This is the **unchecked decoding** counterpart to
+    /// [`read_varint`](Cursor::read_varint): both bounds checks (slice end)
+    /// and value-shape checks (overflow, overlong) are removed. The caller is
+    /// responsible for ensuring the data is well-formed — this is not merely
+    /// "unchecked bounds."
     ///
     /// # Safety
     ///
@@ -878,12 +880,22 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
             }
             let b = data[pos];
             pos += 1;
+            if shift == 63 {
+                // 10th byte: only the low bit is valid for u64. If b > 1,
+                // this is an overflow — stop silently, matching PackedIter
+                // which delegates to read_varint → Err → .ok() → None.
+                if b > 1 {
+                    return;
+                }
+                val |= u64::from(b) << 63;
+                break;
+            }
             val |= u64::from(b & 0x7F) << shift;
             if b < 0x80 {
                 break;
             }
             shift += 7;
-            if shift >= 64 {
+            if shift > 63 {
                 // Overlong varint — stop silently.
                 return;
             }
