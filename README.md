@@ -7,6 +7,12 @@ Extracted from [pbfhogg](https://github.com/folknor/pbfhogg), an OpenStreetMap P
 Built with LLMs. See [LLM.md](LLM.md).
 
 
+## Design philosophy
+
+This crate is optimized for **speed on well-formed protobuf data**, not for adversarial input validation. It was extracted from an OpenStreetMap PBF pipeline where throughput matters and the wire data is trusted.
+
+Concretely: varint/tag decoding validates overflow and rejects malformed sequences, but packed iterators silently end on truncated data (rather than returning `Result` per element), 32-bit packed iterators truncate without range checks, `skip_varint` has no length limit, and `read_tag` passes through reserved wire types without filtering. These are intentional trade-offs documented in the source — see the doc comments on `PackedIter::next`, `zigzag_decode_32`, `skip_varint`, and `read_tag`.
+
 ## What's in the box
 
 - **Cursor** — zero-copy reader over a byte slice: varints (LEB128), zigzag-decoded sint32/sint64, tags, length-delimited fields, fixed-width 32/64, float/double, field skipping, raw field extraction

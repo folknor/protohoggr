@@ -1,8 +1,22 @@
 # Changelog
 
-## 0.2.2
+## 0.3.0
 
+### Added
 - `Cursor::read_raw_field(wire_type)` — returns raw value bytes without decoding, for verbatim field copying
+- `#[must_use]` on all public constructors, accessors, and pure functions
+- `missing_docs` (rust), `must_use_candidate`, `doc_markdown`, `inline_always`, `missing_safety_doc` (clippy) lints denied
+- Doc comments on all public API items
+- Documented `-0.0` behavior in float/double skip-zero encoders
+
+### Breaking
+- `read_varint` now rejects 10-byte varints whose final byte exceeds `0x01` (previously silently overflowed `u64`)
+- `read_varint_u32` now returns `Err` for values exceeding `u32::MAX` (previously silently truncated); `read_tag` inherits this
+- `read_tag` now rejects field number 0 (invalid per protobuf spec, previously returned `(0, wire_type)`)
+- `encode_tag` now panics if `field` is 0 or exceeds `0x1FFF_FFFF`, or if `wire_type` exceeds 7
+
+### Fixed
+- SIMD benchmark tail-byte bias: batch loops now hand off remaining bytes to a scalar tail, so all strategies decode the same values
 
 ## 0.2.1
 

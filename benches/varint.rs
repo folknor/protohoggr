@@ -103,8 +103,9 @@ fn bench_decode_small(group: &mut criterion::BenchmarkGroup<criterion::measureme
     group.bench_with_input(BenchmarkId::new("simd_batch4_u16", label), &pad, |b, d| {
         b.iter(|| {
             let mut pos = 0usize;
-            let end = d.len() - 16;
-            while pos < end {
+            let data_end = d.len() - 16; // actual data length (padding excluded)
+            let batch_end = data_end.saturating_sub(16); // safe zone for 16-byte reads
+            while pos < batch_end {
                 let ptr = d[pos..].as_ptr();
                 let (a, bv, cv, dv, la, lb, lc, ld, _overflow): (
                     u16, u16, u16, u16, u8, u8, u8, u8, bool,
@@ -116,7 +117,7 @@ fn bench_decode_small(group: &mut criterion::BenchmarkGroup<criterion::measureme
                 pos += usize::from(la) + usize::from(lb) + usize::from(lc) + usize::from(ld);
             }
             // tail: safe single decode for remaining values
-            while pos < end {
+            while pos < data_end {
                 if let Ok((v, len)) = varint_simd::decode::decode::<u64>(&d[pos..]) {
                     black_box(zigzag_decode_64(v));
                     pos += len;
@@ -163,8 +164,9 @@ fn bench_decode_large(group: &mut criterion::BenchmarkGroup<criterion::measureme
     group.bench_with_input(BenchmarkId::new("simd_batch2_u32", label), &pad, |b, d| {
         b.iter(|| {
             let mut pos = 0usize;
-            let end = d.len() - 16;
-            while pos < end {
+            let data_end = d.len() - 16;
+            let batch_end = data_end.saturating_sub(16);
+            while pos < batch_end {
                 let ptr = d[pos..].as_ptr();
                 let (a, bv, la, lb): (u32, u32, u8, u8) =
                     unsafe { varint_simd::decode::decode_two_unsafe(ptr) };
@@ -172,7 +174,7 @@ fn bench_decode_large(group: &mut criterion::BenchmarkGroup<criterion::measureme
                 black_box(zigzag_decode_64(u64::from(bv)));
                 pos += usize::from(la) + usize::from(lb);
             }
-            while pos < end {
+            while pos < data_end {
                 if let Ok((v, len)) = varint_simd::decode::decode::<u64>(&d[pos..]) {
                     black_box(zigzag_decode_64(v));
                     pos += len;
@@ -191,8 +193,9 @@ fn bench_decode_large(group: &mut criterion::BenchmarkGroup<criterion::measureme
         |b, d| {
             b.iter(|| {
                 let mut pos = 0usize;
-                let end = d.len() - 16;
-                while pos < end {
+                let data_end = d.len() - 16;
+                let batch_end = data_end.saturating_sub(16);
+                while pos < batch_end {
                     let ptr = d[pos..].as_ptr();
                     let (a, bv, la, lb): (u32, u32, u8, u8) =
                         unsafe { varint_simd::decode::decode_two_unsafe(ptr) };
@@ -200,7 +203,7 @@ fn bench_decode_large(group: &mut criterion::BenchmarkGroup<criterion::measureme
                     black_box(zigzag_decode_64(u64::from(bv)));
                     pos += usize::from(la) + usize::from(lb);
                 }
-                while pos < end {
+                while pos < data_end {
                     if let Ok((v, len)) = varint_simd::decode::decode::<u64>(&d[pos..]) {
                         black_box(zigzag_decode_64(v));
                         pos += len;

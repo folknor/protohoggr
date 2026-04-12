@@ -61,23 +61,30 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    /// Create a new cursor over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
+    /// Returns `true` if the cursor has reached the end of the data.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pos >= self.data.len()
     }
 
+    /// Returns the number of bytes remaining to be read.
     #[inline]
+    #[must_use]
     pub fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
     }
 
     /// Current byte offset within the underlying slice.
     #[inline]
+    #[must_use]
     pub fn position(&self) -> usize {
         self.pos
     }
@@ -113,35 +120,51 @@ impl<'a> Cursor<'a> {
             }
             let b = self.data[self.pos];
             self.pos += 1;
+            if shift == 63 {
+                // 10th byte: only the low bit is valid payload for a u64.
+                if b > 1 {
+                    return Err(wire_error("varint overflows u64"));
+                }
+                val |= u64::from(b) << 63;
+                return Ok(val);
+            }
             val |= u64::from(b & 0x7F) << shift;
             if b < 0x80 {
                 return Ok(val);
             }
             shift += 7;
-            if shift >= 64 {
+            if shift > 63 {
                 return Err(wire_error("varint too long"));
             }
         }
     }
 
+    /// Read a varint and validate it fits in a `u32`.
     #[inline]
     pub fn read_varint_u32(&mut self) -> WireResult<u32> {
+        let v = self.read_varint()?;
+        if v > u64::from(u32::MAX) {
+            return Err(wire_error("varint overflows u32"));
+        }
         #[allow(clippy::cast_possible_truncation)]
-        Ok(self.read_varint()? as u32)
+        Ok(v as u32)
     }
 
+    /// Read a varint and reinterpret as `i64`.
     #[inline]
     pub fn read_varint_i64(&mut self) -> WireResult<i64> {
         #[allow(clippy::cast_possible_wrap)]
         Ok(self.read_varint()? as i64)
     }
 
+    /// Read a zigzag-encoded `sint64` value.
     #[inline]
     pub fn read_sint64(&mut self) -> WireResult<i64> {
         let v = self.read_varint()?;
         Ok(zigzag_decode_64(v))
     }
 
+    /// Read a zigzag-encoded `sint32` value.
     #[inline]
     pub fn read_sint32(&mut self) -> WireResult<i32> {
         let v = self.read_varint()?;
@@ -188,14 +211,23 @@ impl<'a> Cursor<'a> {
         Ok(f64::from_bits(self.read_fixed64()?))
     }
 
-    /// Read a (field_number, wire_type) tag. Returns None at EOF.
+    /// Read a (`field_number`, `wire_type`) tag. Returns `None` at EOF.
+    ///
+    /// Returns `Err` if the field number is 0 (invalid per protobuf spec).
+    /// Reserved/invalid wire types (3, 4, 6, 7) are returned as-is —
+    /// validation is left to the caller or to `skip_field`, which will
+    /// reject unknown types. This keeps the hot path branch-free.
     #[inline]
     pub fn read_tag(&mut self) -> WireResult<Option<(u32, u32)>> {
         if self.is_empty() {
             return Ok(None);
         }
         let v = self.read_varint_u32()?;
-        Ok(Some((v >> 3, v & 0x7)))
+        let field = v >> 3;
+        if field == 0 {
+            return Err(wire_error("tag has field number 0"));
+        }
+        Ok(Some((field, v & 0x7)))
     }
 
     /// Read a length-delimited field, returning the sub-slice.
@@ -213,6 +245,11 @@ impl<'a> Cursor<'a> {
 
     /// Skip a varint by scanning for the terminating byte (MSB=0)
     /// without decoding the value.
+    ///
+    /// Note: this intentionally has no length limit — it will skip varints
+    /// longer than 10 bytes. This is a raw byte scanner for speed, not a
+    /// value decoder. For trusted protobuf data (our use case), varints are
+    /// always well-formed. Use `read_varint` when overflow validation matters.
     #[inline]
     pub fn skip_varint(&mut self) -> WireResult<()> {
         loop {
@@ -273,7 +310,9 @@ impl<'a> Cursor<'a> {
 // Zigzag decode
 // ---------------------------------------------------------------------------
 
+/// Zigzag-decode a `u64` varint into a signed `i64`.
 #[inline]
+#[must_use]
 pub fn zigzag_decode_64(v: u64) -> i64 {
     #[allow(clippy::cast_possible_wrap)]
     let signed = (v >> 1) as i64;
@@ -282,7 +321,14 @@ pub fn zigzag_decode_64(v: u64) -> i64 {
     signed ^ sign
 }
 
+/// Zigzag-decode a `u64` varint into a signed `i32` (truncates to 32 bits first).
+///
+/// Intentionally truncates without validation — `sint32` varints are at most
+/// 5 bytes on the wire, and in valid protobuf data the upper bits are always
+/// zero. Checking would add overhead on every packed element for a case that
+/// doesn't occur with well-formed data.
 #[inline]
+#[must_use]
 pub fn zigzag_decode_32(v: u64) -> i32 {
     #[allow(clippy::cast_possible_truncation)]
     let v32 = v as u32;
@@ -297,33 +343,41 @@ pub fn zigzag_decode_32(v: u64) -> i32 {
 // Packed field iterators
 // ---------------------------------------------------------------------------
 
-/// Base packed varint iterator. Yields raw u64 values.
+/// Base packed varint iterator. Yields raw `u64` values.
 #[derive(Clone)]
 pub struct PackedIter<'a> {
     cursor: Cursor<'a>,
 }
 
 impl<'a> PackedIter<'a> {
+    /// Create a new packed iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             cursor: Cursor::new(data),
         }
     }
 
+    /// Create an empty packed iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             cursor: Cursor::new(&[]),
         }
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cursor.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.cursor.remaining()
     }
@@ -337,9 +391,11 @@ impl Iterator for PackedIter<'_> {
         if self.cursor.is_empty() {
             return None;
         }
-        // Packed field data is trusted to contain complete varints since it was
-        // length-delimited by the outer message. If somehow truncated, we stop
-        // iteration rather than propagating errors through the Iterator trait.
+        // Intentional: errors are swallowed as None, ending iteration.
+        // Packed fields are length-delimited by the outer message, so in
+        // well-formed protobuf data they always contain complete varints.
+        // A fallible iterator would add per-element overhead for a case
+        // that cannot happen with valid wire data.
         self.cursor.read_varint().ok()
     }
 
@@ -355,26 +411,35 @@ impl Iterator for PackedIter<'_> {
 
 // --- Typed wrappers ---
 
+/// Packed iterator yielding zigzag-decoded `i64` values (`sint64`).
 #[derive(Clone)]
 pub struct PackedSint64Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedSint64Iter<'a> {
+    /// Create a new packed `sint64` iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
 
+    /// Create an empty packed `sint64` iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.0.remaining_bytes()
     }
@@ -394,26 +459,35 @@ impl Iterator for PackedSint64Iter<'_> {
     }
 }
 
+/// Packed iterator yielding zigzag-decoded `i32` values (`sint32`).
 #[derive(Clone)]
 pub struct PackedSint32Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedSint32Iter<'a> {
+    /// Create a new packed `sint32` iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
 
+    /// Create an empty packed `sint32` iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.0.remaining_bytes()
     }
@@ -433,26 +507,35 @@ impl Iterator for PackedSint32Iter<'_> {
     }
 }
 
+/// Packed iterator yielding `i64` values (`int64`).
 #[derive(Clone)]
 pub struct PackedInt64Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedInt64Iter<'a> {
+    /// Create a new packed `int64` iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
 
+    /// Create an empty packed `int64` iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.0.remaining_bytes()
     }
@@ -473,26 +556,40 @@ impl Iterator for PackedInt64Iter<'_> {
     }
 }
 
+/// Packed iterator yielding `i32` values (`int32`).
+///
+/// Truncates each `u64` varint to `i32` without overflow validation.
+/// Valid `int32` packed fields never contain varints exceeding 32-bit
+/// range, so checking would add per-element overhead for a case that
+/// doesn't occur with well-formed data.
 #[derive(Clone)]
 pub struct PackedInt32Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedInt32Iter<'a> {
+    /// Create a new packed `int32` iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
 
+    /// Create an empty packed `int32` iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.0.remaining_bytes()
     }
@@ -513,26 +610,40 @@ impl Iterator for PackedInt32Iter<'_> {
     }
 }
 
+/// Packed iterator yielding `u32` values (`uint32`).
+///
+/// Truncates each `u64` varint to `u32` without overflow validation.
+/// Valid `uint32` packed fields never contain varints exceeding 32-bit
+/// range, so checking would add per-element overhead for a case that
+/// doesn't occur with well-formed data.
 #[derive(Clone)]
 pub struct PackedUint32Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedUint32Iter<'a> {
+    /// Create a new packed `uint32` iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
 
+    /// Create an empty packed `uint32` iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.0.remaining_bytes()
     }
@@ -553,26 +664,35 @@ impl Iterator for PackedUint32Iter<'_> {
     }
 }
 
+/// Packed iterator yielding `bool` values.
 #[derive(Clone)]
 pub struct PackedBoolIter<'a>(PackedIter<'a>);
 
 impl<'a> PackedBoolIter<'a> {
+    /// Create a new packed `bool` iterator over the given byte slice.
     #[inline]
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self(PackedIter::new(data))
     }
 
+    /// Create an empty packed `bool` iterator.
     #[inline]
+    #[must_use]
     pub fn empty() -> Self {
         Self(PackedIter::empty())
     }
 
+    /// Returns `true` if no bytes remain.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Returns the number of undecoded bytes remaining.
     #[inline]
+    #[must_use]
     pub fn remaining_bytes(&self) -> usize {
         self.0.remaining_bytes()
     }
@@ -616,6 +736,7 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 ///
 /// Maps: 0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, …
 #[inline]
+#[must_use]
 #[allow(clippy::cast_sign_loss)]
 pub fn zigzag_encode_64(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
@@ -623,6 +744,7 @@ pub fn zigzag_encode_64(v: i64) -> u64 {
 
 /// Zigzag-encode a signed 32-bit integer for `sint32` fields.
 #[inline]
+#[must_use]
 #[allow(clippy::cast_sign_loss)]
 pub fn zigzag_encode_32(v: i32) -> u64 {
     ((v << 1) ^ (v >> 31)) as u64
@@ -632,9 +754,16 @@ pub fn zigzag_encode_32(v: i32) -> u64 {
 // Field-level encoders
 // ---------------------------------------------------------------------------
 
-/// Encode a field tag (field_number, wire_type) as a varint.
+/// Encode a field tag (`field_number`, `wire_type`) as a varint.
+///
+/// # Panics
+///
+/// Panics if `field` is 0 or exceeds `0x1FFF_FFFF` (the protobuf maximum of
+/// 2^29 − 1), or if `wire_type` exceeds 7 (only 3 bits are available).
 #[inline]
 pub fn encode_tag(buf: &mut Vec<u8>, field: u32, wire_type: u32) {
+    assert!(field > 0 && field <= 0x1FFF_FFFF, "field number out of range");
+    assert!(wire_type <= 7, "wire type out of range");
     encode_varint(buf, u64::from(field << 3 | wire_type));
 }
 
@@ -813,7 +942,9 @@ pub fn encode_fixed64_field_always(buf: &mut Vec<u8>, field: u32, value: u64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
-/// Encode a `float` field. Skips if `value == 0.0`.
+/// Encode a `float` field. Skips if bit pattern is zero (positive `0.0`).
+///
+/// Note: `-0.0` has a non-zero bit pattern and will NOT be skipped.
 #[inline]
 pub fn encode_float_field(buf: &mut Vec<u8>, field: u32, value: f32) {
     if value.to_bits() != 0 {
@@ -829,7 +960,9 @@ pub fn encode_float_field_always(buf: &mut Vec<u8>, field: u32, value: f32) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
-/// Encode a `double` field. Skips if `value == 0.0`.
+/// Encode a `double` field. Skips if bit pattern is zero (positive `0.0`).
+///
+/// Note: `-0.0` has a non-zero bit pattern and will NOT be skipped.
 #[inline]
 pub fn encode_double_field(buf: &mut Vec<u8>, field: u32, value: f64) {
     if value.to_bits() != 0 {
@@ -933,4 +1066,3 @@ pub fn encode_packed_bool(buf: &mut Vec<u8>, field: u32, values: &[bool]) {
         buf.push(u8::from(v));
     }
 }
-

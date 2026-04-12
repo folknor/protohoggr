@@ -1,6 +1,6 @@
 [package]
 name = "protohoggr"
-version = "0.2.2"
+version = "0.3.0"
 description = "Zero-copy protobuf wire-format primitives: varint, zigzag, cursor-based decoder, field encoders, packed repeated fields."
 license = "MIT OR Apache-2.0"
 edition = "2024"
@@ -44,6 +44,13 @@ cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 unwrap_used = "deny"
 too_many_lines = "deny"
+must_use_candidate = "deny"
+doc_markdown = "deny"
+inline_always = "deny"
+missing_safety_doc = "deny"
+
+[lints.rust]
+missing_docs = "deny"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }

@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, missing_docs)]
 
 use protohoggr::*;
 
@@ -39,6 +39,82 @@ fn decode_varint_empty() {
     assert!(c.read_varint().is_err());
 }
 
+#[test]
+fn decode_varint_10byte_max_valid() {
+    // u64::MAX = 0xFFFFFFFFFFFFFFFF encodes as 9 bytes of 0xFF + final byte 0x01
+    let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_varint().unwrap(), u64::MAX);
+}
+
+#[test]
+fn decode_varint_10byte_overflow() {
+    // Same as above but final byte is 0x02 — overflows u64
+    let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+    let mut c = Cursor::new(&data);
+    assert!(c.read_varint().is_err());
+}
+
+#[test]
+fn decode_varint_10byte_overflow_high() {
+    // Final byte 0x7F — way beyond u64
+    let data = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F];
+    let mut c = Cursor::new(&data);
+    assert!(c.read_varint().is_err());
+}
+
+#[test]
+fn decode_varint_11byte_rejected() {
+    // 11 continuation bytes — too long regardless of final byte
+    let data = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00];
+    let mut c = Cursor::new(&data);
+    assert!(c.read_varint().is_err());
+}
+
+#[test]
+fn decode_varint_u32_valid() {
+    let mut buf = Vec::new();
+    encode_varint(&mut buf, u64::from(u32::MAX));
+    let mut c = Cursor::new(&buf);
+    assert_eq!(c.read_varint_u32().unwrap(), u32::MAX);
+}
+
+#[test]
+fn decode_varint_u32_overflow() {
+    let mut buf = Vec::new();
+    encode_varint(&mut buf, u64::from(u32::MAX) + 1);
+    let mut c = Cursor::new(&buf);
+    assert!(c.read_varint_u32().is_err());
+}
+
+#[test]
+fn decode_varint_i64_wrap() {
+    // u64::MAX reinterpreted as i64 is -1
+    let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_varint_i64().unwrap(), -1);
+}
+
+#[test]
+fn decode_read_tag_oversized_varint() {
+    // A tag varint that decodes to a value > u32::MAX should error
+    let mut buf = Vec::new();
+    encode_varint(&mut buf, u64::from(u32::MAX) + 1);
+    let mut c = Cursor::new(&buf);
+    assert!(c.read_tag().is_err());
+}
+
+#[test]
+fn decode_read_tag_field_zero() {
+    // Tag varint where field_number = 0 is invalid per protobuf spec.
+    // Wire type bits 0-2 can be anything; field bits 3+ are all zero.
+    for wire_type in 0..=7u8 {
+        let data = [wire_type];
+        let mut c = Cursor::new(&data);
+        assert!(c.read_tag().is_err(), "tag with field 0, wire_type {wire_type} should error");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Decode: zigzag
 // ---------------------------------------------------------------------------
@@ -56,6 +132,81 @@ fn zigzag_decode_roundtrip() {
     assert_eq!(zigzag_decode_32(1), -1);
     assert_eq!(zigzag_decode_32(2), 1);
     assert_eq!(zigzag_decode_32(3), -2);
+}
+
+// ---------------------------------------------------------------------------
+// Decode: sint32 standalone
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decode_sint32_standalone() {
+    // zigzag: 0→0, 1→-1, 2→1, 4294967294→i32::MAX, 4294967295→i32::MIN
+    for (raw, expected) in [
+        (0u64, 0i32),
+        (1, -1),
+        (2, 1),
+        (3, -2),
+        (4294967294, i32::MAX),
+        (4294967295, i32::MIN),
+    ] {
+        let mut buf = Vec::new();
+        encode_varint(&mut buf, raw);
+        let mut c = Cursor::new(&buf);
+        assert_eq!(c.read_sint32().unwrap(), expected, "sint32 failed for raw={raw}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decode: skip_varint edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skip_varint_overlength() {
+    // 11 continuation bytes + terminator — not a valid varint (>10 bytes).
+    // skip_varint has no length check (by design it just scans for MSB=0),
+    // so this documents that it skips overlength sequences without error.
+    let mut data = vec![0x80; 11];
+    data.push(0x00); // terminator
+    let mut c = Cursor::new(&data);
+    // skip_varint accepts this — it's a raw byte scanner, not a value decoder
+    c.skip_varint().unwrap();
+    assert!(c.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Cursor: clone
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cursor_clone_independent() {
+    let data = [0x01, 0x02, 0x03];
+    let mut c1 = Cursor::new(&data);
+    c1.read_varint().unwrap(); // advance to pos 1
+    let mut c2 = c1.clone();
+    // Both should be at the same position
+    assert_eq!(c1.position(), c2.position());
+    // Advancing one shouldn't affect the other
+    c2.read_varint().unwrap();
+    assert_eq!(c1.position(), 1);
+    assert_eq!(c2.position(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// WireError: Display and Error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wire_error_display() {
+    let err = Cursor::new(&[]).read_varint().unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("wire format error:"), "got: {msg}");
+}
+
+#[test]
+fn wire_error_is_error() {
+    let err = Cursor::new(&[]).read_varint().unwrap_err();
+    // Verify it implements std::error::Error (source() returns None for simple errors)
+    let _: &dyn std::error::Error = &err;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +276,52 @@ fn packed_iter_size_hint() {
     let (lo, hi) = iter.size_hint();
     assert_eq!(lo, 1);
     assert_eq!(hi, Some(10));
+}
+
+#[test]
+fn packed_typed_iter_size_hint() {
+    let data = [0x01, 0x02, 0x03, 0x04, 0x05];
+    // All typed wrappers delegate to PackedIter::size_hint
+    let (lo, hi) = PackedSint64Iter::new(&data).size_hint();
+    assert_eq!((lo, hi), (0, Some(5)));
+    let (lo, hi) = PackedSint32Iter::new(&data).size_hint();
+    assert_eq!((lo, hi), (0, Some(5)));
+    let (lo, hi) = PackedInt64Iter::new(&data).size_hint();
+    assert_eq!((lo, hi), (0, Some(5)));
+    let (lo, hi) = PackedInt32Iter::new(&data).size_hint();
+    assert_eq!((lo, hi), (0, Some(5)));
+    let (lo, hi) = PackedUint32Iter::new(&data).size_hint();
+    assert_eq!((lo, hi), (0, Some(5)));
+    let (lo, hi) = PackedBoolIter::new(&data).size_hint();
+    assert_eq!((lo, hi), (0, Some(5)));
+}
+
+#[test]
+fn packed_typed_iter_remaining_bytes() {
+    let data = [0x01, 0x02, 0x03];
+    assert_eq!(PackedSint64Iter::new(&data).remaining_bytes(), 3);
+    assert_eq!(PackedSint32Iter::new(&data).remaining_bytes(), 3);
+    assert_eq!(PackedInt64Iter::new(&data).remaining_bytes(), 3);
+    assert_eq!(PackedInt32Iter::new(&data).remaining_bytes(), 3);
+    assert_eq!(PackedUint32Iter::new(&data).remaining_bytes(), 3);
+    assert_eq!(PackedBoolIter::new(&data).remaining_bytes(), 3);
+    // empty() should have 0 remaining
+    assert_eq!(PackedSint64Iter::empty().remaining_bytes(), 0);
+    assert_eq!(PackedSint32Iter::empty().remaining_bytes(), 0);
+    assert_eq!(PackedInt64Iter::empty().remaining_bytes(), 0);
+    assert_eq!(PackedInt32Iter::empty().remaining_bytes(), 0);
+    assert_eq!(PackedUint32Iter::empty().remaining_bytes(), 0);
+    assert_eq!(PackedBoolIter::empty().remaining_bytes(), 0);
+}
+
+#[test]
+fn packed_typed_iter_empty() {
+    assert!(PackedSint64Iter::empty().is_empty());
+    assert!(PackedSint32Iter::empty().is_empty());
+    assert!(PackedInt64Iter::empty().is_empty());
+    assert!(PackedInt32Iter::empty().is_empty());
+    assert!(PackedUint32Iter::empty().is_empty());
+    assert!(PackedBoolIter::empty().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +443,46 @@ fn read_raw_field_len_delimited() {
     // Raw includes the length prefix varint + the payload
     assert_eq!(raw, &[0x03, 0xAA, 0xBB, 0xCC]);
     assert!(c.is_empty());
+}
+
+#[test]
+fn read_raw_field_truncated_varint() {
+    // Continuation byte with no terminator
+    let mut c = Cursor::new(&[0x80]);
+    assert!(c.read_raw_field(WIRE_VARINT).is_err());
+}
+
+#[test]
+fn read_raw_field_empty_varint() {
+    let mut c = Cursor::new(&[]);
+    assert!(c.read_raw_field(WIRE_VARINT).is_err());
+}
+
+#[test]
+fn read_raw_field_truncated_64bit() {
+    let mut c = Cursor::new(&[0x01, 0x02, 0x03]);
+    assert!(c.read_raw_field(WIRE_64BIT).is_err());
+}
+
+#[test]
+fn read_raw_field_truncated_32bit() {
+    let mut c = Cursor::new(&[0x01, 0x02]);
+    assert!(c.read_raw_field(WIRE_32BIT).is_err());
+}
+
+#[test]
+fn read_raw_field_truncated_len_payload() {
+    // Length says 5 bytes but only 2 follow
+    let data = [0x05, 0xAA, 0xBB];
+    let mut c = Cursor::new(&data);
+    assert!(c.read_raw_field(WIRE_LEN).is_err());
+}
+
+#[test]
+fn read_raw_field_truncated_len_prefix() {
+    // Continuation byte in length varint with no terminator
+    let mut c = Cursor::new(&[0x80]);
+    assert!(c.read_raw_field(WIRE_LEN).is_err());
 }
 
 #[test]
@@ -380,8 +617,94 @@ fn zigzag_encode_decode_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
+// Encode: tag
+// ---------------------------------------------------------------------------
+
+#[test]
+fn encode_tag_standalone() {
+    let mut buf = Vec::new();
+    // field 1, WIRE_VARINT → (1 << 3) | 0 = 0x08
+    encode_tag(&mut buf, 1, WIRE_VARINT);
+    assert_eq!(buf, [0x08]);
+
+    buf.clear();
+    // field 1, WIRE_LEN �� (1 << 3) | 2 = 0x0A
+    encode_tag(&mut buf, 1, WIRE_LEN);
+    assert_eq!(buf, [0x0A]);
+
+    buf.clear();
+    // field 15, WIRE_VARINT → (15 << 3) | 0 = 120 = 0x78
+    encode_tag(&mut buf, 15, WIRE_VARINT);
+    assert_eq!(buf, [0x78]);
+
+    buf.clear();
+    // field 16, WIRE_VARINT → (16 << 3) | 0 = 128 → 2-byte varint
+    encode_tag(&mut buf, 16, WIRE_VARINT);
+    assert_eq!(buf, [0x80, 0x01]);
+}
+
+#[test]
+fn encode_tag_max_field_number() {
+    // Max valid field number: 2^29 - 1 = 536870911
+    let mut buf = Vec::new();
+    encode_tag(&mut buf, 0x1FFF_FFFF, WIRE_VARINT);
+    // Decode it back
+    let mut c = Cursor::new(&buf);
+    let (field, wt) = c.read_tag().unwrap().unwrap();
+    assert_eq!(field, 0x1FFF_FFFF);
+    assert_eq!(wt, WIRE_VARINT);
+}
+
+#[test]
+#[should_panic(expected = "field number out of range")]
+fn encode_tag_field_zero_panics() {
+    let mut buf = Vec::new();
+    encode_tag(&mut buf, 0, WIRE_VARINT);
+}
+
+#[test]
+#[should_panic(expected = "field number out of range")]
+fn encode_tag_field_overflow_panics() {
+    let mut buf = Vec::new();
+    encode_tag(&mut buf, 0x2000_0000, WIRE_VARINT);
+}
+
+#[test]
+#[should_panic(expected = "wire type out of range")]
+fn encode_tag_wire_type_overflow_panics() {
+    let mut buf = Vec::new();
+    encode_tag(&mut buf, 1, 8);
+}
+
+// ---------------------------------------------------------------------------
 // Encode: field-level
 // ---------------------------------------------------------------------------
+
+#[test]
+fn varint_field_skip_zero() {
+    let mut buf = Vec::new();
+    encode_varint_field(&mut buf, 1, 0);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn varint_field_nonzero() {
+    let mut buf = Vec::new();
+    encode_varint_field(&mut buf, 1, 42);
+    assert_eq!(buf, [0x08, 0x2A]);
+}
+
+#[test]
+fn int32_field_positive_roundtrip() {
+    let mut buf = Vec::new();
+    encode_int32_field(&mut buf, 1, 42);
+    let mut c = Cursor::new(&buf);
+    let (field, wt) = c.read_tag().unwrap().unwrap();
+    assert_eq!((field, wt), (1, WIRE_VARINT));
+    // int32 on the wire is just a varint
+    let decoded = c.read_varint().unwrap();
+    assert_eq!(decoded, 42);
+}
 
 #[test]
 fn int64_field_skip_zero() {
@@ -954,4 +1277,90 @@ fn double_field_encode_decode_roundtrip() {
         assert_eq!(decoded.to_bits(), value.to_bits(), "roundtrip failed for {value}");
         assert!(c.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Float/double special values: NaN, -0.0, infinity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn float_nan_roundtrip() {
+    let mut buf = Vec::new();
+    encode_float_field_always(&mut buf, 1, f32::NAN);
+    let mut c = Cursor::new(&buf);
+    let (_, wt) = c.read_tag().unwrap().unwrap();
+    assert_eq!(wt, WIRE_32BIT);
+    let decoded = c.read_float().unwrap();
+    assert!(decoded.is_nan());
+}
+
+#[test]
+fn float_infinity_roundtrip() {
+    for value in [f32::INFINITY, f32::NEG_INFINITY] {
+        let mut buf = Vec::new();
+        encode_float_field_always(&mut buf, 1, value);
+        let mut c = Cursor::new(&buf);
+        let _ = c.read_tag().unwrap().unwrap();
+        let decoded = c.read_float().unwrap();
+        assert_eq!(decoded, value);
+    }
+}
+
+#[test]
+fn float_negative_zero_not_skipped() {
+    // -0.0 has non-zero bits (sign bit set), so skip-zero encoders should encode it
+    let mut buf = Vec::new();
+    encode_float_field(&mut buf, 1, -0.0_f32);
+    assert!(!buf.is_empty(), "-0.0 should not be skipped");
+    // Verify it roundtrips correctly
+    let mut c = Cursor::new(&buf);
+    let _ = c.read_tag().unwrap().unwrap();
+    let decoded = c.read_float().unwrap();
+    assert!(decoded.is_sign_negative());
+    assert_eq!(decoded, 0.0);
+}
+
+#[test]
+fn double_nan_roundtrip() {
+    let mut buf = Vec::new();
+    encode_double_field_always(&mut buf, 1, f64::NAN);
+    let mut c = Cursor::new(&buf);
+    let _ = c.read_tag().unwrap().unwrap();
+    let decoded = c.read_double().unwrap();
+    assert!(decoded.is_nan());
+}
+
+#[test]
+fn double_infinity_roundtrip() {
+    for value in [f64::INFINITY, f64::NEG_INFINITY] {
+        let mut buf = Vec::new();
+        encode_double_field_always(&mut buf, 1, value);
+        let mut c = Cursor::new(&buf);
+        let _ = c.read_tag().unwrap().unwrap();
+        let decoded = c.read_double().unwrap();
+        assert_eq!(decoded, value);
+    }
+}
+
+#[test]
+fn double_negative_zero_not_skipped() {
+    let mut buf = Vec::new();
+    encode_double_field(&mut buf, 1, -0.0_f64);
+    assert!(!buf.is_empty(), "-0.0 should not be skipped");
+    let mut c = Cursor::new(&buf);
+    let _ = c.read_tag().unwrap().unwrap();
+    let decoded = c.read_double().unwrap();
+    assert!(decoded.is_sign_negative());
+    assert_eq!(decoded, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Encode: packed_bool empty
+// ---------------------------------------------------------------------------
+
+#[test]
+fn packed_bool_empty() {
+    let mut buf = Vec::new();
+    encode_packed_bool(&mut buf, 1, &[]);
+    assert!(buf.is_empty());
 }
