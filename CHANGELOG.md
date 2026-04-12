@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- `Cursor::read_raw_field(wire_type)` — returns raw value bytes without decoding, for verbatim field copying
+
 ## 0.2.1
 
 - Bump criterion dev-dependency from 0.5 to 0.8.2

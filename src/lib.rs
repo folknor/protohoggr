@@ -227,6 +227,20 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    /// Read the raw bytes of a field's value given its wire type, without
+    /// decoding. The returned slice covers exactly the value bytes (varint
+    /// bytes for `WIRE_VARINT`, the length prefix + payload for `WIRE_LEN`,
+    /// the 4/8 fixed bytes for `WIRE_32BIT`/`WIRE_64BIT`).
+    ///
+    /// This is useful for copying unknown fields verbatim without re-encoding.
+    /// The tag is NOT included — the caller already has it from `read_tag()`.
+    #[inline]
+    pub fn read_raw_field(&mut self, wire_type: u32) -> WireResult<&'a [u8]> {
+        let start = self.pos;
+        self.skip_field(wire_type)?;
+        Ok(&self.data[start..self.pos])
+    }
+
     /// Skip an unknown field given its wire type.
     #[inline]
     pub fn skip_field(&mut self, wire_type: u32) -> WireResult<()> {

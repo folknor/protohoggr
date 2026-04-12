@@ -206,6 +206,74 @@ fn skip_field_unknown_wire_type() {
 }
 
 // ---------------------------------------------------------------------------
+// Decode: read_raw_field
+// ---------------------------------------------------------------------------
+
+#[test]
+fn read_raw_field_varint() {
+    // Two-byte varint (300 = 0xAC 0x02), then a trailing byte to confirm position
+    let data = [0xAC, 0x02, 0xFF];
+    let mut c = Cursor::new(&data);
+    let raw = c.read_raw_field(WIRE_VARINT).unwrap();
+    assert_eq!(raw, &[0xAC, 0x02]);
+    assert_eq!(c.remaining(), 1);
+}
+
+#[test]
+fn read_raw_field_64bit() {
+    let bytes = 0x0102_0304_0506_0708_u64.to_le_bytes();
+    let mut c = Cursor::new(&bytes);
+    let raw = c.read_raw_field(WIRE_64BIT).unwrap();
+    assert_eq!(raw, &bytes);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn read_raw_field_32bit() {
+    let bytes = 0x0102_0304_u32.to_le_bytes();
+    let mut c = Cursor::new(&bytes);
+    let raw = c.read_raw_field(WIRE_32BIT).unwrap();
+    assert_eq!(raw, &bytes);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn read_raw_field_len_delimited() {
+    // Length prefix (3) + 3 payload bytes
+    let data = [0x03, 0xAA, 0xBB, 0xCC];
+    let mut c = Cursor::new(&data);
+    let raw = c.read_raw_field(WIRE_LEN).unwrap();
+    // Raw includes the length prefix varint + the payload
+    assert_eq!(raw, &[0x03, 0xAA, 0xBB, 0xCC]);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn read_raw_field_unknown_wire_type() {
+    let mut c = Cursor::new(&[]);
+    assert!(c.read_raw_field(3).is_err());
+}
+
+#[test]
+fn read_raw_field_roundtrip() {
+    // Encode a full message with two fields, read them raw, reassemble verbatim
+    let mut encoded = Vec::new();
+    encode_varint_field(&mut encoded, 1, 300);
+    encode_bytes_field(&mut encoded, 2, b"hello");
+
+    let mut c = Cursor::new(&encoded);
+    let mut reassembled = Vec::new();
+
+    while let Some((field_num, wire_type)) = c.read_tag().unwrap() {
+        let raw_value = c.read_raw_field(wire_type).unwrap();
+        encode_tag(&mut reassembled, field_num, wire_type);
+        reassembled.extend_from_slice(raw_value);
+    }
+
+    assert_eq!(reassembled, encoded);
+}
+
+// ---------------------------------------------------------------------------
 // Cursor: remaining
 // ---------------------------------------------------------------------------
 
