@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+- `count_packed_varints(data)` — count varint terminals in a packed field; SSE2 SIMD on x86-64, scalar fallback elsewhere
+- `decode_packed_sint64_cumulative(data, base, out)` — batch decode an entire packed sint64 field with cumulative sum, replacing per-element `PackedSint64Iter` + manual accumulation; append semantics, wrapping i64 addition, mirrors packed iterator error-swallowing behavior
+- `encode_varint_to_slice(buf, value)` — `unsafe` slice-based varint encode (contract: `buf.len() >= 10`), with branchless 1-byte and 2-byte fast paths for values < 16384 (~95% of zigzag-encoded OSM way-ref deltas)
+- `Cursor::read_varint_unchecked()` — `unsafe` infallible varint read that skips all bounds checks; safety contract requires a complete well-formed varint at the current position
+
 ## 0.3.0
 
 ### Added

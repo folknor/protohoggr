@@ -139,6 +139,54 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    /// Read a varint (LEB128) without bounds checks. Infallible.
+    ///
+    /// This is the unchecked counterpart to [`read_varint`](Cursor::read_varint)
+    /// for use inside validated length-delimited regions where all varints are
+    /// known to be complete and well-formed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that at the current position there exists a
+    /// complete, well-formed varint:
+    ///
+    /// 1. At least one byte with MSB=0 (terminal) exists before the end of
+    ///    the underlying slice.
+    /// 2. The varint is at most 10 bytes and does not overflow `u64` (if a
+    ///    10th byte is present, it must be `<= 1`).
+    ///
+    /// Violating condition 1 causes an out-of-bounds read (UB). Violating
+    /// condition 2 produces an unspecified value (not UB, but meaningless).
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    pub unsafe fn read_varint_unchecked(&mut self) -> u64 {
+        // SAFETY: caller guarantees a valid varint at pos.
+        let b = unsafe { *self.data.get_unchecked(self.pos) };
+        self.pos += 1;
+        if b < 0x80 {
+            return u64::from(b);
+        }
+        // SAFETY: caller guarantees completeness — slow path won't read OOB.
+        unsafe { self.read_varint_unchecked_slow(u64::from(b & 0x7F)) }
+    }
+
+    #[cold]
+    #[allow(clippy::cast_possible_truncation)]
+    unsafe fn read_varint_unchecked_slow(&mut self, mut val: u64) -> u64 {
+        let mut shift: u32 = 7;
+        loop {
+            // SAFETY: caller of read_varint_unchecked guarantees a terminal
+            // byte exists before end of slice.
+            let b = unsafe { *self.data.get_unchecked(self.pos) };
+            self.pos += 1;
+            val |= u64::from(b & 0x7F) << shift;
+            if b < 0x80 {
+                return val;
+            }
+            shift += 7;
+        }
+    }
+
     /// Read a varint and validate it fits in a `u32`.
     #[inline]
     pub fn read_varint_u32(&mut self) -> WireResult<u32> {
@@ -713,6 +761,140 @@ impl Iterator for PackedBoolIter<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Batch packed-field operations
+// ---------------------------------------------------------------------------
+
+/// Count the number of varints in a packed field by counting terminal bytes
+/// (bytes with the high bit clear, `b & 0x80 == 0`).
+///
+/// This counts terminal bytes, not necessarily complete varints. A truncated
+/// final varint (no terminal byte) is simply not counted. This matches the
+/// intended use: counting elements in a length-delimited packed field that
+/// was already validated by the enclosing message framing.
+#[inline]
+#[must_use]
+pub fn count_packed_varints(data: &[u8]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE2 is baseline on x86-64 — always available.
+        unsafe { count_packed_varints_sse2(data) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        count_packed_varints_scalar(data)
+    }
+}
+
+/// Scalar fallback: count bytes where `b < 0x80`.
+#[cfg(not(target_arch = "x86_64"))]
+fn count_packed_varints_scalar(data: &[u8]) -> usize {
+    let mut count = 0usize;
+    for &b in data {
+        if b < 0x80 {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// SSE2 implementation: process 16 bytes at a time using `PMOVMSKB`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn count_packed_varints_sse2(data: &[u8]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::{_mm_loadu_si128, _mm_movemask_epi8};
+
+    let mut count = 0usize;
+    let len = data.len();
+    let mut i = 0usize;
+    let ptr = data.as_ptr();
+
+    // Process 16-byte chunks.
+    while i + 16 <= len {
+        // SAFETY: we checked i + 16 <= len, so ptr.add(i) is valid for 16 bytes.
+        let chunk = unsafe { _mm_loadu_si128(ptr.add(i).cast()) };
+        // movemask extracts the high bit of each byte into a 16-bit mask.
+        // Terminals have high bit = 0, so we invert and popcount.
+        #[allow(clippy::cast_sign_loss)]
+        let mask = _mm_movemask_epi8(chunk) as u32;
+        count += (!mask & 0xFFFF).count_ones() as usize;
+        i += 16;
+    }
+
+    // Scalar tail.
+    while i < len {
+        // SAFETY: i < len is checked.
+        if unsafe { *ptr.add(i) } < 0x80 {
+            count += 1;
+        }
+        i += 1;
+    }
+
+    count
+}
+
+/// Decode an entire packed `sint64` field, accumulating zigzag-decoded deltas
+/// into absolute IDs starting from `base`.
+///
+/// Appends results to `out` without clearing it. The caller controls whether
+/// to clear `out` beforehand.
+///
+/// Mirrors [`PackedSint64Iter`] semantics: decode errors (truncated tail) are
+/// silently swallowed, ending iteration. This is a batch operation for trusted
+/// wire data, not a strict validator.
+///
+/// Accumulation uses wrapping `i64` addition — no overflow checks.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64>) {
+    let count = count_packed_varints(data);
+    if count == 0 {
+        return;
+    }
+    out.reserve(count);
+
+    let len = data.len();
+    let mut pos = 0usize;
+    let mut acc = base;
+
+    while pos < len {
+        // Read first byte.
+        let b = data[pos];
+        pos += 1;
+        if b < 0x80 {
+            // Single-byte varint fast path.
+            let delta = zigzag_decode_64(u64::from(b));
+            acc = acc.wrapping_add(delta);
+            out.push(acc);
+            continue;
+        }
+
+        // Multi-byte varint.
+        let mut val = u64::from(b & 0x7F);
+        let mut shift: u32 = 7;
+        loop {
+            if pos >= len {
+                // Truncated varint — stop silently (packed iterator semantics).
+                return;
+            }
+            let b = data[pos];
+            pos += 1;
+            val |= u64::from(b & 0x7F) << shift;
+            if b < 0x80 {
+                break;
+            }
+            shift += 7;
+            if shift >= 64 {
+                // Overlong varint — stop silently.
+                return;
+            }
+        }
+        let delta = zigzag_decode_64(val);
+        acc = acc.wrapping_add(delta);
+        out.push(acc);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Encoding: varint / zigzag
 // ---------------------------------------------------------------------------
 
@@ -730,6 +912,47 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
         value >>= 7;
     }
     buf.push(value as u8);
+}
+
+/// Encode a `u64` as a variable-length integer (LEB128) into a pre-allocated
+/// slice, returning the number of bytes written.
+///
+/// Includes a branchless fast path for 1-byte (`< 128`) and 2-byte
+/// (`< 16384`) values, covering ~95% of zigzag-encoded OSM way-ref deltas.
+///
+/// # Safety
+///
+/// Caller must ensure `buf.len() >= 10`.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+pub unsafe fn encode_varint_to_slice(buf: &mut [u8], value: u64) -> usize {
+    // 1-byte fast path: value < 128
+    if value < 0x80 {
+        // SAFETY: caller guarantees buf.len() >= 10.
+        unsafe { *buf.get_unchecked_mut(0) = value as u8 };
+        return 1;
+    }
+    // 2-byte fast path: value < 16384
+    if value < 0x4000 {
+        // SAFETY: caller guarantees buf.len() >= 10.
+        unsafe {
+            *buf.get_unchecked_mut(0) = (value as u8) | 0x80;
+            *buf.get_unchecked_mut(1) = (value >> 7) as u8;
+        }
+        return 2;
+    }
+    // General path for values >= 16384.
+    let mut value = value;
+    let mut i = 0usize;
+    while value >= 0x80 {
+        // SAFETY: caller guarantees buf.len() >= 10, and a u64 varint is at most 10 bytes.
+        unsafe { *buf.get_unchecked_mut(i) = (value as u8) | 0x80 };
+        value >>= 7;
+        i += 1;
+    }
+    // SAFETY: i < 10 at this point.
+    unsafe { *buf.get_unchecked_mut(i) = value as u8 };
+    i + 1
 }
 
 /// Zigzag-encode a signed 64-bit integer for `sint64` fields.

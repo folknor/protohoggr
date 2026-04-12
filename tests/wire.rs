@@ -1364,3 +1364,321 @@ fn packed_bool_empty() {
     encode_packed_bool(&mut buf, 1, &[]);
     assert!(buf.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// count_packed_varints
+// ---------------------------------------------------------------------------
+
+#[test]
+fn count_varints_empty() {
+    assert_eq!(count_packed_varints(&[]), 0);
+}
+
+#[test]
+fn count_varints_all_single_byte() {
+    assert_eq!(count_packed_varints(&[0x01, 0x7F, 0x00]), 3);
+}
+
+#[test]
+fn count_varints_mixed() {
+    // 300 = [0xAC, 0x02] (2 bytes), 1 = [0x01] (1 byte), 150 = [0x96, 0x01] (2 bytes)
+    assert_eq!(count_packed_varints(&[0xAC, 0x02, 0x01, 0x96, 0x01]), 3);
+}
+
+#[test]
+fn count_varints_single() {
+    assert_eq!(count_packed_varints(&[0x05]), 1);
+    assert_eq!(count_packed_varints(&[0xAC, 0x02]), 1);
+}
+
+#[test]
+fn count_varints_truncated_tail() {
+    // Continuation byte with no terminal — not counted.
+    assert_eq!(count_packed_varints(&[0x80]), 0);
+    // One complete varint [0x01] followed by a truncated one [0x80].
+    assert_eq!(count_packed_varints(&[0x01, 0x80]), 1);
+}
+
+#[test]
+fn count_varints_17_bytes() {
+    // Exercises SIMD 16-byte chunk + 1-byte scalar tail on x86-64.
+    // 17 single-byte varints.
+    let data: Vec<u8> = (0..17).collect();
+    assert_eq!(count_packed_varints(&data), 17);
+}
+
+#[test]
+fn count_varints_32_bytes() {
+    // Two full SIMD iterations on x86-64.
+    let data: Vec<u8> = (0..32).map(|i| i & 0x7F).collect();
+    assert_eq!(count_packed_varints(&data), 32);
+}
+
+#[test]
+fn count_varints_32_bytes_mixed_continuation() {
+    // 32 bytes, every other byte is a continuation byte.
+    let mut data = vec![0u8; 32];
+    for i in 0..32 {
+        data[i] = if i % 2 == 0 { 0x80 } else { 0x01 };
+    }
+    // 16 terminal bytes (odd indices).
+    assert_eq!(count_packed_varints(&data), 16);
+}
+
+// ---------------------------------------------------------------------------
+// decode_packed_sint64_cumulative
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cumulative_empty() {
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&[], 0, &mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn cumulative_empty_with_base() {
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&[], 42, &mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn cumulative_single_element() {
+    // Zigzag encode delta=5: zigzag(5) = 10 = 0x0A
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&[0x0A], 0, &mut out);
+    assert_eq!(out, vec![5]);
+}
+
+#[test]
+fn cumulative_base_nonzero() {
+    // delta=3, base=100 → 103
+    // zigzag(3) = 6 = 0x06
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&[0x06], 100, &mut out);
+    assert_eq!(out, vec![103]);
+}
+
+#[test]
+fn cumulative_roundtrip() {
+    // Encode known deltas, then decode and verify cumulative sums.
+    let deltas: Vec<i64> = vec![10, -3, 7, -1, 20];
+    let mut scratch = Vec::new();
+    let mut field_buf = Vec::new();
+    encode_packed_sint64(&mut field_buf, &mut scratch, 1, &deltas);
+
+    // Strip tag + length prefix to get packed body.
+    let mut c = Cursor::new(&field_buf);
+    let _ = c.read_tag().unwrap();
+    let body = c.read_len_delimited().unwrap();
+
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(body, 0, &mut out);
+
+    // Expected: cumulative sums of [10, -3, 7, -1, 20]
+    assert_eq!(out, vec![10, 7, 14, 13, 33]);
+}
+
+#[test]
+fn cumulative_roundtrip_with_base() {
+    let deltas: Vec<i64> = vec![5, -2, 8];
+    let mut scratch = Vec::new();
+    let mut field_buf = Vec::new();
+    encode_packed_sint64(&mut field_buf, &mut scratch, 1, &deltas);
+
+    let mut c = Cursor::new(&field_buf);
+    let _ = c.read_tag().unwrap();
+    let body = c.read_len_delimited().unwrap();
+
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(body, 1000, &mut out);
+    assert_eq!(out, vec![1005, 1003, 1011]);
+}
+
+#[test]
+fn cumulative_append_semantics() {
+    // out already has elements — new results should be appended.
+    let mut out = vec![999i64, 888];
+    // delta=1 → zigzag(1) = 2 = 0x02
+    decode_packed_sint64_cumulative(&[0x02], 0, &mut out);
+    assert_eq!(out, vec![999, 888, 1]);
+}
+
+#[test]
+fn cumulative_boundary_values() {
+    // Test zigzag/varint size boundaries as single deltas, base=0.
+    let boundary_values: Vec<i64> = vec![63, 64, 127, 128, 8191, 8192, 16383, 16384];
+    for &val in &boundary_values {
+        let mut scratch = Vec::new();
+        let mut field_buf = Vec::new();
+        encode_packed_sint64(&mut field_buf, &mut scratch, 1, &[val]);
+        let mut c = Cursor::new(&field_buf);
+        let _ = c.read_tag().unwrap();
+        let body = c.read_len_delimited().unwrap();
+
+        let mut out = Vec::new();
+        decode_packed_sint64_cumulative(body, 0, &mut out);
+        assert_eq!(out, vec![val], "failed for delta={val}");
+    }
+}
+
+#[test]
+fn cumulative_extreme_deltas() {
+    // i64::MIN and i64::MAX as single deltas.
+    for &val in &[i64::MIN, i64::MAX] {
+        let mut scratch = Vec::new();
+        let mut field_buf = Vec::new();
+        encode_packed_sint64(&mut field_buf, &mut scratch, 1, &[val]);
+        let mut c = Cursor::new(&field_buf);
+        let _ = c.read_tag().unwrap();
+        let body = c.read_len_delimited().unwrap();
+
+        let mut out = Vec::new();
+        decode_packed_sint64_cumulative(body, 0, &mut out);
+        assert_eq!(out, vec![val], "failed for delta={val}");
+    }
+}
+
+#[test]
+fn cumulative_wrapping() {
+    // Accumulation that crosses i64 range boundary.
+    // base = i64::MAX, delta = 1 → wraps to i64::MIN
+    // zigzag(1) = 2 = 0x02
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&[0x02], i64::MAX, &mut out);
+    assert_eq!(out, vec![i64::MAX.wrapping_add(1)]);
+    assert_eq!(out[0], i64::MIN);
+}
+
+// ---------------------------------------------------------------------------
+// encode_varint_to_slice
+// ---------------------------------------------------------------------------
+
+#[test]
+fn encode_to_slice_1byte() {
+    let mut buf = [0u8; 10];
+    for value in [0u64, 1, 127] {
+        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
+        assert_eq!(n, 1, "value={value}");
+        // Roundtrip.
+        let mut c = Cursor::new(&buf[..n]);
+        assert_eq!(c.read_varint().unwrap(), value);
+    }
+}
+
+#[test]
+fn encode_to_slice_2byte() {
+    let mut buf = [0u8; 10];
+    for value in [128u64, 300, 16383] {
+        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
+        assert_eq!(n, 2, "value={value}");
+        let mut c = Cursor::new(&buf[..n]);
+        assert_eq!(c.read_varint().unwrap(), value);
+    }
+}
+
+#[test]
+fn encode_to_slice_3byte_boundary() {
+    let mut buf = [0u8; 10];
+    let n = unsafe { encode_varint_to_slice(&mut buf, 16384) };
+    assert_eq!(n, 3);
+    let mut c = Cursor::new(&buf[..n]);
+    assert_eq!(c.read_varint().unwrap(), 16384);
+}
+
+#[test]
+fn encode_to_slice_max() {
+    let mut buf = [0u8; 10];
+    let n = unsafe { encode_varint_to_slice(&mut buf, u64::MAX) };
+    assert_eq!(n, 10);
+    let mut c = Cursor::new(&buf[..n]);
+    assert_eq!(c.read_varint().unwrap(), u64::MAX);
+}
+
+#[test]
+fn encode_to_slice_roundtrip_sweep() {
+    // Sweep through varint size boundaries.
+    let values = [0u64, 1, 127, 128, 16383, 16384, 2097151, 2097152, u32::MAX as u64, u64::MAX];
+    let mut buf = [0u8; 10];
+    for value in values {
+        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
+        let mut c = Cursor::new(&buf[..n]);
+        assert_eq!(c.read_varint().unwrap(), value, "roundtrip failed for {value}");
+        assert!(c.is_empty(), "trailing bytes for {value}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor::read_varint_unchecked
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unchecked_single_byte() {
+    for value in [0u64, 1, 127] {
+        let mut buf = [0u8; 10];
+        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
+        let mut c = Cursor::new(&buf[..n]);
+        let result = unsafe { c.read_varint_unchecked() };
+        assert_eq!(result, value, "value={value}");
+        assert!(c.is_empty());
+    }
+}
+
+#[test]
+fn unchecked_multi_byte() {
+    for value in [128u64, 150, 300, 16383, 16384, 2097151] {
+        let mut buf = [0u8; 10];
+        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
+        let mut c = Cursor::new(&buf[..n]);
+        let result = unsafe { c.read_varint_unchecked() };
+        assert_eq!(result, value, "value={value}");
+        assert!(c.is_empty());
+    }
+}
+
+#[test]
+fn unchecked_u64_max() {
+    let mut buf = [0u8; 10];
+    let n = unsafe { encode_varint_to_slice(&mut buf, u64::MAX) };
+    let mut c = Cursor::new(&buf[..n]);
+    let result = unsafe { c.read_varint_unchecked() };
+    assert_eq!(result, u64::MAX);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn unchecked_matches_checked() {
+    // Verify identical results and cursor advancement for a range of valid values.
+    let values = [0u64, 1, 127, 128, 300, 16383, 16384, u32::MAX as u64, u64::MAX];
+    for value in values {
+        let mut buf = [0u8; 10];
+        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
+
+        let mut checked = Cursor::new(&buf[..n]);
+        let mut unchecked = Cursor::new(&buf[..n]);
+
+        let checked_val = checked.read_varint().unwrap();
+        let unchecked_val = unsafe { unchecked.read_varint_unchecked() };
+
+        assert_eq!(checked_val, unchecked_val, "value mismatch for {value}");
+        assert_eq!(checked.position(), unchecked.position(), "position mismatch for {value}");
+    }
+}
+
+#[test]
+fn unchecked_sequential_reads() {
+    // Multiple varints back to back, read sequentially with unchecked.
+    let values = [1u64, 300, 127, 16384, 0];
+    let mut encoded = Vec::new();
+    for &v in &values {
+        encode_varint(&mut encoded, v);
+    }
+
+    let mut c = Cursor::new(&encoded);
+    for &expected in &values {
+        let result = unsafe { c.read_varint_unchecked() };
+        assert_eq!(result, expected);
+    }
+    assert!(c.is_empty());
+}

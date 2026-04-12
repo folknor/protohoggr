@@ -1,6 +1,6 @@
 [package]
 name = "protohoggr"
-version = "0.3.0"
+version = "0.4.0"
 description = "Zero-copy protobuf wire-format primitives: varint, zigzag, cursor-based decoder, field encoders, packed repeated fields."
 license = "MIT OR Apache-2.0"
 edition = "2024"
