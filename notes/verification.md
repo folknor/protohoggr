@@ -78,63 +78,6 @@ the implementation. Enforceable structurally.
 
 Reported by: codex/tests, opus/tests.
 
-## VER-018 - The check builds and tests a host-tuned artifact under a user-global cargo config
-
-`~/.cargo/config.toml`, outside the repo, sets for `x86_64-unknown-linux-gnu`:
-`-Ctarget-cpu=native` (a Zen 5 part with AVX-512 per opus/tests),
-`-Zthreads=16` (nightly-only), `-Clink-arg=-fuse-ld=wild` (needs gcc >= 16.1),
-`rustc-wrapper = brokkr-rustc-guard`, `profile.dev.debug = "line-tables-only"`
-and `jobs = 12`. Consequences reported:
-
-- Tests validate code compiled for this CPU; crates.io consumers get baseline
-  x86-64. Scalar loops may vectorize differently; a codegen-dependent bug
-  would pass here and fail elsewhere, or the reverse, and nothing records the
-  effective flags (silent degradation).
-- `-Zthreads` makes every stable toolchain refuse to build on this host, which
-  is why "nightly toolchain" appears in AGENTS.md and why the MSRV cannot be
-  checked here (VER-019).
-- A host without wild or gcc 16 fails at link time (refusal).
-- The doc-comment benchmark numbers carry the same hidden condition.
-
-Proposed: make the check's target explicit - a project `.cargo/config.toml`
-with `rustflags = ["-Ctarget-cpu=x86-64"]` (later `-Ctarget-cpu` wins,
-opus/tests), and/or a brokkr sweep with known `CARGO_ENCODED_RUSTFLAGS` that
-records the flags; a lane that builds with host rustflags stripped proves the
-crate does not need them (opus/machinery). Enforceable by the sweep or the
-project config file.
-
-Reported by: opus/tests, opus/machinery; codex/bench notes the
-`-Ctarget-cpu=native` dependency.
-
-## VER-019 - The toolchain is unpinned, and `rust-version` is never checked
-
-- AGENTS.md says "nightly toolchain"; no `rust-toolchain.toml` exists, so
-  nightly comes from the rustup default
-  (`nightly-x86_64-unknown-linux-gnu (default)`). Which nightly runs is
-  whatever was last installed; nightly clippy adds and renames lints, and
-  under any-diagnostic-fails new lints break the check in untouched code, so a
-  result is not reproducible across days (opus/machinery,
-  opus/brokkr-config). brokkr test needs nightly (`-Z unstable-options
-  --format json`), the rustdoc phase picks `--check` only on nightly, and Miri
-  is nightly-only, so a stable-default host degrades three ways
-  (opus/brokkr-config).
-- `rust-version` is published to crates.io and checked by nothing: the check
-  builds only on the host nightly, never on the declared minimum.
-  opus/brokkr-config notes clippy's default-warn `incompatible_msrv` reads `rust-version` and,
-  under brokkr, fails on std APIs stabilized after it, so API drift is caught;
-  language-feature drift and lint-behaviour differences between the minimum
-  and the host nightly are not (opus/machinery).
-
-Proposed: pin a dated nightly in `rust-toolchain.toml`; an MSRV lane
-(`cargo +<msrv> check --lib`) with host rustflags neutralized, which needs the
-minimum toolchain installed. Separate the promises: library on its minimum
-compiler, dev machinery on a specified nightly, and record compiler and brokkr
-identities in results (codex/machinery). Open intent question: should the
-toolchain be pinned?
-
-Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
-opus/brokkr-config.
-
 ## Benchmark
 
 ## VER-021 - The benchmark has no correctness gate and is never run by the check
@@ -276,53 +219,6 @@ paths. The list is its own enforcement.
 Reported by: opus/machinery; individual lints proposed by opus/tests,
 opus/bench, opus/brokkr-config.
 
-## Documentation claims
-
-
-
-
-## VER-037 - AGENTS.md, CLAUDE.md and LLM.md statements that are false or drift
-
-- AGENTS.md: "nightly toolchain" - see VER-019.
-- CLAUDE.md: "Always run `brokkr fmt` before a commit". Nothing checks it.
-  Proposed by opus/brokkr-config:
-
-  ```toml
-  [[script_check]]
-  name = "rustfmt"
-  command = "cargo fmt --all --check && echo rustfmt-clean"
-  expect = "rustfmt-clean"
-  stage = "pre-clippy"
-  ```
-
-  or a pre-commit hook (opus/machinery).
-- LLM.md: the sentence claiming the separation is enforced by tooling was
-  reworded to say it is kept by working practice and not audited here. Still
-  open for the user: the absolute claim that the development agent never sees
-  third-party source, and what the document should claim. The
-  check does not audit agent access or provenance; `.review.toml` holds only an
-  `[_audit] id`. opus/machinery: LLM.md is byte-identical in size to brokkr's
-  copy, so it is a template. codex/machinery found insufficient evidence to
-  call the historical claim false. Proposed: state the actual boundary for this
-  repo.
-- CHANGELOG Unreleased has a Breaking section while `Cargo.toml` says 0.4.0;
-  nothing ties a Breaking entry to a version bump. A release-time script check
-  could (opus/machinery).
-- opus/brokkr-config: an `[[textlint]]` rule would hold "`unwrap_used` is
-  denied in library code" against an `#[allow(clippy::unwrap_used)]` landing in
-  `src/` (holds today):
-
-  ```toml
-  [[textlint]]
-  name = "no-unwrap-escape-in-src"
-  pattern = 'allow\([^)]*clippy::(?:unwrap_used|expect_used|unwrap_in_result)'
-  paths = ["src/**/*.rs"]
-  region = "code"
-  message = "unwrap_used is denied in library code; return WireResult instead"
-  ```
-
-Reported by: codex/machinery, opus/tests, opus/machinery, opus/brokkr-config.
-
 ## Repository and check machinery
 
 ## VER-042 - The lib unit-test harness holds only the `count_packed_varints` tests
@@ -340,28 +236,7 @@ nothing measurable here.
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery.
 
-
 ## Outside the repository
-
-## VER-048 - The harness memory file for this project is stale and against the user's rules
-
-`~/.claude/projects/-home-folk-Programs-protohoggr/memory/MEMORY.md` says "78
-integration tests" and "~810 lines" (today 156 tests and about 1,300 lines) and
-lists an older API. The user's rules say never to use that directory and not to
-hard-code drifting counts; it is loaded into every session as if
-authoritative. Proposed: delete it, moving anything worth keeping into
-AGENTS.md.
-
-Reported by: opus/tests, opus/machinery, opus/brokkr-config.
-
-## VER-049 - `.claude/settings.local.json` allowlists raw `cargo`
-
-It permits `Bash(cargo:*)`, `Bash(cargo test:*)` and `Bash(cargo clippy:*)`
-while AGENTS.md says never run raw `cargo`. The file is ignored by the user's
-global git ignore, so it is local only, but the permission layer permits the
-violation and is the one place the rule could be enforced mechanically.
-
-Reported by: opus/tests, opus/machinery.
 
 ## VER-050 - Where cross-project conventions should live as brokkr config
 

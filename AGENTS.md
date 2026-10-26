@@ -8,17 +8,16 @@ This crate is optimized for **speed on well-formed protobuf data**, not for adve
 ## Project structure
 
 Single-library crate. Implementation in `src/lib.rs`, integration tests in `tests/wire.rs`.
-Benchmarks live in `bench/`, an unpublished workspace member: criterion targets
-plus `examples/ab.rs`, a same-binary A/B against a pinned baseline revision.
-How to measure, and why it is done that way, is in `reference/performance.md`.
 
 Benchmarks live in `bench/`, a separate unpublished workspace member
 (`protohoggr-bench`) that owns criterion and varint-simd, so the library's
-tests never compile them. `default-members` keeps the tested sweeps on the
-library alone; `brokkr check` lints and documents the bench through its own
-`[[lint_sweep]]` entries. Run it with `brokkr bench varint`. The varint-simd
-batch comparisons need SSSE3 and are left out (with a stderr notice) on builds
-without it.
+tests never compile them: criterion targets plus `examples/ab.rs`, a
+same-binary A/B against a pinned baseline revision. `default-members` keeps the
+tested sweeps on the library alone; `brokkr check` lints and documents the bench
+through its own `[[lint_sweep]]` entries. Run it with `brokkr bench varint`. The
+varint-simd batch comparisons need SSSE3 and are left out (with a stderr notice)
+on builds without it. How to measure, and why it is done that way, is in
+`reference/performance.md`.
 
 ## Build & test
 
@@ -53,6 +52,30 @@ target.
 - Field encoders skip zero/empty/false values by default (protobuf convention); `_always` variants write unconditionally. The varint and tag primitives always write
 - Packed encoders other than `encode_packed_bool` take a `&mut Vec<u8>` scratch buffer to avoid repeated allocation
 - Heavy use of `#[inline]` on hot-path functions
+
+## Settled findings
+
+Reviews have raised the following, and the owner decided to leave them as they
+are. Do not report them again.
+
+- **Host build configuration.** The check builds and tests under the user-wide
+  `~/.cargo/config.toml` on the development host (`-Ctarget-cpu=native`,
+  `-Zthreads`, the `wild` linker, the brokkr rustc guard), not under a baseline
+  target or a repository-local cargo config. No baseline-flags lane, no
+  repo-local `.cargo/config.toml` pinning the target, no lane that strips host
+  rustflags.
+- **Toolchain.** The toolchain is the host's rustup nightly default, with no
+  `rust-toolchain.toml` pin. `rust-version` in `Cargo.toml` is not checked by
+  any MSRV build lane.
+- **Agent and LLM documents.** The wording of `AGENTS.md`, `CLAUDE.md` and
+  `LLM.md` (including LLM.md's account of the clean-room separation and what
+  tooling does or does not audit) is the owner's. No `rustfmt` check enforcing
+  "run `brokkr fmt` before a commit", no release-time check tying a CHANGELOG
+  Breaking entry to a version bump, and no textlint rule against
+  `allow(clippy::unwrap_used)` in `src/` (`allow_attributes` is denied anyway).
+- **Files outside the repository.** The harness memory file under
+  `~/.claude/projects/` and the permissions in `.claude/settings.local.json`
+  are the owner's to manage; they are not part of this repository's checks.
 
 ## Rules
 
