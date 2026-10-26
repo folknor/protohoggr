@@ -43,15 +43,15 @@ target.
 
 - Rust 2024 edition, nightly toolchain
 - No external dependencies of any kind, dev included - pure Rust, std only. Enforced by the `no-external-dependencies` rule in `brokkr.toml`; anything a bench needs goes in `bench/Cargo.toml`
-- Very strict clippy: 30+ lints set to `deny` in `Cargo.toml` under `[workspace.lints.clippy]`, inherited by both packages
+- Very strict clippy: every lint in `[workspace.lints.clippy]` in `Cargo.toml` is set to `deny`, inherited by both packages
   - `unwrap_used` is denied - enforced via `Cargo.toml`
   - `cast_sign_loss`, `cast_possible_truncation`, `cast_possible_wrap` are denied - use `#[expect(...)]` locally with care (`allow_attributes` is denied, and a stale expectation fails the build)
   - `cognitive_complexity` and `too_many_lines` are denied - keep functions small
   - `undocumented_unsafe_blocks` is denied - every `unsafe` block carries a `// SAFETY:` comment; the gate runs the test suite under Miri to check the unsafe paths for UB
-- Test module uses `#[allow(clippy::unwrap_used)]` so `.unwrap()` is fine in tests
+- `tests/wire.rs` carries a crate-level `#![expect(clippy::unwrap_used, missing_docs)]`, so `.unwrap()` is fine in tests
 - Use `WireResult<T>` / `WireError` for fallible operations, not panics
-- Encoding functions skip zero/empty/false values by default (protobuf convention); `_always` variants write unconditionally
-- Packed encoders take a `&mut Vec<u8>` scratch buffer to avoid repeated allocation
+- Field encoders skip zero/empty/false values by default (protobuf convention); `_always` variants write unconditionally. The varint and tag primitives always write
+- Packed encoders other than `encode_packed_bool` take a `&mut Vec<u8>` scratch buffer to avoid repeated allocation
 - Heavy use of `#[inline]` on hot-path functions
 
 ## Rules

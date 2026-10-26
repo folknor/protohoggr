@@ -30,6 +30,7 @@ pub const BUFS: usize = 8;
 
 /// Xorshift64: a fixed, dependency-free stream, so every run and both sides
 /// of a comparison see the same inputs.
+#[derive(Debug)]
 pub struct Rng(u64);
 
 impl Rng {
@@ -175,6 +176,7 @@ pub fn rotated(rng: &mut Rng, mut make: impl FnMut(&mut Rng) -> Vec<u8>) -> Vec<
 }
 
 /// Every input set, drawn in a fixed order from one [`Rng`].
+#[derive(Debug)]
 pub struct Inputs {
     /// Packed sint64, one-byte varints.
     pub small: Vec<Vec<u8>>,

@@ -12,7 +12,7 @@ same principle, with LLMs as the separation boundary.
 We have no control over or insight into the training data of the LLMs we
 use, and we recognize that this is not a perfect implementation of the
 clean-room process. It is as close as we can get, and we built dedicated
-tooling to enforce it.
+tooling to support it.
 
 ## Process
 
@@ -32,8 +32,9 @@ different licenses, a structural separation is maintained:
   implementations and are consulted for analysis, comparison, and critique -
   but they produce analysis and critique, never code, pseudocode, or
   structural blueprints.
-- This separation is enforced by tooling
-  ([review](https://github.com/folknor/review)), not by convention alone.
+- The review sessions are run with
+  [review](https://github.com/folknor/review). The separation itself is kept
+  by working practice; the build and checks here do not audit it.
 
 This mirrors the clean-room design pattern: one team reads the reference
 material and produces a specification, a separate team writes the

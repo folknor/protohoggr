@@ -245,13 +245,13 @@ impl<'a> Cursor<'a> {
     /// inside the bad varint. Record [`position`](Self::position) before the
     /// read if the start of the failed varint matters.
     ///
-    /// This scalar implementation intentionally does NOT use SIMD. Benchmarked
-    /// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSSE3): scalar is
-    /// 2.3x faster than SIMD batch4 decode for 1-byte varints (the dominant
-    /// OSM case - dense node id/lat/lon deltas) and tied for 3-byte varints.
-    /// The 1-byte fast path below is perfectly predicted by the CPU branch
-    /// predictor, beating SSE shuffle + mask overhead. See `notes/SIMD.md` in
-    /// pbfhogg (dd7f69a) for the full research doc (P3-20, closed).
+    /// This scalar implementation intentionally does NOT use SIMD. An early
+    /// comparison against the varint-simd crate's batch decoders favoured the
+    /// scalar loop on packed data dominated by one-byte varints, where the
+    /// single-byte fast path below is cheap and well predicted, and the
+    /// decision stands on that. The figures from that comparison were not
+    /// retained, so no ratio is claimed here; `reference/performance.md` in the
+    /// repository describes how to measure it.
     #[inline]
     pub fn read_varint(&mut self) -> WireResult<u64> {
         if self.pos >= self.data.len() {
@@ -597,6 +597,11 @@ const fn sint32_wire_bits(v: u64) -> u32 {
 /// wrappers too. There is no way to tell a decode error from the end of the
 /// data; use [`Cursor::read_varint`] in a loop when errors matter.
 ///
+/// Swallowing errors is intentional. Packed fields are length-delimited by the
+/// outer message, so in well-formed protobuf data they always contain complete
+/// varints, and a fallible iterator would add per-element overhead for a case
+/// that cannot happen with valid wire data.
+///
 /// # Size hint
 ///
 /// `size_hint` returns `(remaining / 10, Some(remaining))` from the byte
@@ -625,7 +630,7 @@ const fn sint32_wire_bits(v: u64) -> u32 {
 /// panicking on untrusted input or fabricating values from misaligned bytes.
 /// For an exact count of an untrusted body, count successful
 /// [`Cursor::read_varint`] calls.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedIter<'a> {
     cursor: Cursor<'a>,
 }
@@ -700,7 +705,7 @@ impl Iterator for PackedIter<'_> {
 // --- Typed wrappers ---
 
 /// Packed iterator yielding zigzag-decoded `i64` values (`sint64`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedSint64Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedSint64Iter<'a> {
@@ -753,7 +758,7 @@ impl Iterator for PackedSint64Iter<'_> {
 ///
 /// Like [`Cursor::read_sint32`], truncates each varint to 32 bits without a
 /// range check before zigzag decoding.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedSint32Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedSint32Iter<'a> {
@@ -803,7 +808,7 @@ impl Iterator for PackedSint32Iter<'_> {
 }
 
 /// Packed iterator yielding `i64` values (`int64`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedInt64Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedInt64Iter<'a> {
@@ -859,7 +864,7 @@ impl Iterator for PackedInt64Iter<'_> {
 /// protobuf's specified conversion, not a shortcut: a wire value that doesn't
 /// fit the field type reads as if cast to it in C++, and wider values do occur
 /// in valid data, e.g. after an `int64` field is changed to `int32`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedInt32Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedInt32Iter<'a> {
@@ -915,7 +920,7 @@ impl Iterator for PackedInt32Iter<'_> {
 /// protobuf's specified conversion, not a shortcut: a wire value that doesn't
 /// fit the field type reads as if cast to it in C++, and wider values do occur
 /// in valid data, e.g. after a `uint64` field is changed to `uint32`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedUint32Iter<'a>(PackedIter<'a>);
 
 impl<'a> PackedUint32Iter<'a> {
@@ -966,7 +971,7 @@ impl Iterator for PackedUint32Iter<'_> {
 }
 
 /// Packed iterator yielding `bool` values.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PackedBoolIter<'a>(PackedIter<'a>);
 
 impl<'a> PackedBoolIter<'a> {
@@ -1195,10 +1200,10 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
 
 /// Encode a `u64` as a variable-length integer (LEB128) into `buf`.
 ///
-/// This scalar implementation intentionally does NOT use SIMD. Benchmarked
-/// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSE2): scalar is
-/// 3.5x faster for 1-byte varints and 1.5x faster for 3-byte varints.
-/// See `notes/SIMD.md` in pbfhogg (dd7f69a) (P3-20, closed).
+/// This scalar implementation intentionally does NOT use SIMD. An early
+/// comparison against the varint-simd crate's encoder favoured the scalar loop
+/// and the decision stands on that; the figures were not retained, so no ratio
+/// is claimed here.
 #[inline]
 #[expect(clippy::cast_possible_truncation)]
 pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
@@ -1220,8 +1225,8 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 /// with `first_chunk_mut::<10>()`, which is a length check per call unless
 /// the optimizer can remove it.
 ///
-/// Has dedicated 1-byte (`< 128`) and 2-byte (`< 16384`) fast paths, covering
-/// ~95% of zigzag-encoded OSM way-ref deltas.
+/// Has dedicated 1-byte (`< 128`) and 2-byte (`< 16384`) fast paths, aimed at
+/// workloads dominated by small values such as zigzag-encoded deltas.
 #[inline]
 #[expect(clippy::cast_possible_truncation)]
 pub fn encode_varint_to_array(buf: &mut [u8; 10], value: u64) -> usize {

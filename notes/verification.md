@@ -230,7 +230,7 @@ and `jobs = 12`. Consequences reported:
   is why "nightly toolchain" appears in AGENTS.md and why the MSRV cannot be
   checked here (VER-019).
 - A host without wild or gcc 16 fails at link time (refusal).
-- The doc-comment benchmark numbers carry the same hidden condition (VER-024).
+- The doc-comment benchmark numbers carry the same hidden condition.
 
 Proposed: make the check's target explicit - a project `.cargo/config.toml`
 with `rustflags = ["-Ctarget-cpu=x86-64"]` (later `-Ctarget-cpu` wins,
@@ -351,88 +351,7 @@ length); derive labels from fixture metadata. Enforceable by test.
 
 Reported by: codex/bench, opus/bench, opus/machinery.
 
-## VER-024 - Durable performance and workload claims rest on no recorded, reproducible measurement
 
-Claims: `Cursor::read_varint` doc (scalar 2.3x faster than batch4 for 1-byte,
-tied for 3-byte, "perfectly predicted"); `encode_varint` doc (3.5x and 1.5x);
-CHANGELOG 0.2.0 ("2-6x on decode, 1.5-3.5x on encode");
-`encode_varint_to_array` doc and CHANGELOG 0.4.0 ("~95% of
-zigzag-encoded OSM way-ref deltas"). Reported problems:
-
-- No retained result names hardware, compiler, flags, confidence intervals or
-  bench revision (codex/bench, opus/machinery). The numbers arrived with
-  `fcad0e7` (2026-03-02), before the tail-bias fix in `3219f18` (2026-04-12),
-  and nothing re-measured since, so they come from the bench the project calls
-  biased (opus/bench). The 0.3.0 CHANGELOG entry does not say the 0.2.0 numbers
-  were measured under that bias.
-- The ISA labels (SSSE3, SSE2) in the doc comments do not describe what runs
-  under `-Ctarget-cpu=native`, which turns on AVX2 and switches varint-simd's
-  `u64` paths. The bench IDs now carry the build's level suffix; the doc
-  comments still do not.
-- "tied for 3-byte" is the 2.6-byte mixed set (VER-023); the encode ratios
-  compare unequal work (VER-022); the decode bench measures iterator traversal
-  plus zigzag, not an isolated `read_varint` (codex/bench); "6x" is against
-  `simd_single` (opus/bench).
-- "tied" vs "2-6x" read as inconsistent (opus/machinery).
-- The cited research doc (`dd7f69a:notes/SIMD.md` in pbfhogg) says node ID
-  deltas are "mostly 1-3 bytes", lat/lon "mostly 1-2 bytes" and way ref deltas
-  "2-4 bytes", contradicting the "1-byte dominant" and "~95% under 16384"
-  claims; 60% of the bench's own "way ref" fixture is at or above 16384
-  (opus/bench). codex/bench: the fixture cannot support the percentage, which
-  does not disprove the real-world figure.
-- "perfectly predicted": the data is 100% 1-byte in a period-10 pattern and
-  nothing measured branch misses.
-- 0.4.0's hot-path primitives (`decode_packed_sint64_cumulative`,
-  `count_packed_varints`, `read_varint_unchecked`, `encode_varint_to_array`)
-  were added as performance work and none is benchmarked; `scalar_iter` still
-  times the `PackedSint64Iter` path the 0.4.0 entry says is being replaced; the
-  justification lives in an ignored `.plans/` file (codex/bench, opus/bench).
-- The research context (planet-scale volume, the P3-20 decision and its
-  reversibility) exists only in another repo's history (opus/bench).
-- criterion baselines live in `target/criterion`, which `cargo clean` deletes
-  (VER-026).
-
-Proposed: `reference/performance.md` (the folder AGENTS.md prescribes, absent
-here) holding qualified measurements with host, flags, toolchain, command, date
-and the `brokkr bench` environment stamp; doc comments state the decision and
-point there or at the bench; bench the production entry points whose
-performance motivated them, against the baselines they replace. Enforceable
-partly: a textlint rule rejecting speed-ratio patterns (`\d(\.\d)?x faster`)
-in `src/` doc comments (opus/bench); numeric claims referencing result records
-(codex/bench). Universal ratios and "perfect" prediction cannot be enforced by
-a portable build; representativeness needs a documented corpus and review.
-
-Reported by: codex/bench, codex/machinery, codex/tests, opus/bench,
-opus/machinery, opus/brokkr-config.
-
-## VER-025 - Durable source comments cite `notes/` in another repository
-
-`Cursor::read_varint` and `encode_varint` doc comments say "See
-`notes/SIMD.md` in pbfhogg (dd7f69a) for the full research doc (P3-20,
-closed)". AGENTS.md: nothing durable may cite `notes/`, and a code comment must
-carry its full context. The citation is cross-repository and pins a sha, and
-`notes/SIMD.md` is no longer present at pbfhogg HEAD - reachable only through
-history (opus/bench).
-
-Proposed: carry the decision inline and move the evidence to
-`reference/performance.md` (VER-024). Enforceable by text rule. Proposed by
-opus/brokkr-config:
-
-```toml
-[[textlint]]
-name = "durable-text-does-not-cite-notes"
-pattern = '\bnotes/'
-paths = ["src/**/*.rs", "tests/**/*.rs", "benches/**/*.rs", "README.md", "CHANGELOG.md", "docs/**", "reference/**"]
-must_scan = ["src/lib.rs"]
-message = "durable text must not cite notes/; carry the context inline"
-```
-
-opus/machinery additionally proposes forbidding 7-to-40-hex-digit sha-like
-tokens in doc comments. Open intent question: does the rule cover another
-repository's notes?
-
-Reported by: codex/tests, codex/bench, codex/machinery, opus/tests, opus/bench,
-opus/machinery, opus/brokkr-config.
 
 ## VER-026 - The bench header sends readers to raw `cargo bench` and cargo's scratch directory
 
@@ -485,8 +404,7 @@ curated while lints the crate does need are absent:
 `multiple_unsafe_ops_per_block` (`undocumented_unsafe_blocks` is now denied),
 `arithmetic_side_effects` on the cursor
 arithmetic and `indexing_slicing` on the decoder (bounded reads now go
-through `Cursor::take`, but the varint paths and `read_raw_field` still index),
-`missing_debug_implementations` (VER-035).
+through `Cursor::take`, but the varint paths and `read_raw_field` still index).
 
 Proposed: curate the list for a decoder of untrusted lengths with unsafe hot
 paths. The list is its own enforcement.
@@ -496,56 +414,11 @@ opus/bench, opus/brokkr-config.
 
 ## Documentation claims
 
-## VER-032 - README and AGENTS.md hand-maintain inventories the code defines
 
-README's "What's in the box" restates the public API and is already
-incomplete (no `encode_tag`, `zigzag_decode_64`, `zigzag_decode_32`,
-`WireError`, `WireResult` or the `WIRE_*` constants, per opus/brokkr-config).
-README and AGENTS.md also state each field encoder has a skip-zero default and
-an `_always` variant - true today for all twelve, held by nothing.
 
-Proposed: cut the list to categories and link generated docs, or hold it with
-a script check extracting `pub` item names from `src/lib.rs` and requiring each
-in README (opus/tests, opus/brokkr-config); generation with a stale-output
-check (codex/tests).
-
-Reported by: codex/tests, codex/machinery, opus/tests, opus/brokkr-config.
-
-## VER-035 - Packed iterator types derive `Clone` but not `Debug`
-
-`Cursor` derives both. `missing_debug_implementations` would hold it.
-
-Reported by: opus/tests.
-
-## VER-036 - Smaller README and source claims that are false or unenforced
-
-- README: "All encoding functions skip zero/empty/false values by default"
-  (repeated in AGENTS.md). `encode_varint(0)`, `encode_tag` and
-  `encode_varint_to_array` do not; the policy holds for field encoders.
-  Behaviour tables can hold it (codex/tests, codex/machinery, opus/machinery).
-- README: "see the doc comments on `PackedIter::next`, `skip_varint`, and
-  `read_tag`". The `PackedIter::next` rationale is a `//` comment in the body,
-  invisible in rustdoc. Move it to `///` on `PackedIter`; README-as-crate-docs
-  with an intra-doc link would make a move fail rustdoc (opus/tests,
-  opus/machinery).
-- README: "rejects malformed sequences" can be read as covering non-canonical
-  encodings; `read_varint` accepts `[0x80, 0x00]` as 0, which protobuf permits
-  (opus/machinery, wording only).
-
-Reported by: codex/tests, codex/bench, codex/machinery, opus/tests,
-opus/bench, opus/machinery.
 
 ## VER-037 - AGENTS.md, CLAUDE.md and LLM.md statements that are false or drift
 
-- AGENTS.md: "30+ lints set to `deny`". A drifting count; "every lint in
-  `[lints.clippy]` is denied" says it without drifting (opus/machinery,
-  opus/brokkr-config).
-- AGENTS.md: "Test module uses `#[allow(clippy::unwrap_used)]`". It is a
-  crate-level inner attribute in `tests/wire.rs` that also allows
-  `missing_docs`, which cannot fire on private test fns (opus/tests,
-  opus/machinery).
-- AGENTS.md: "Packed encoders take a `&mut Vec<u8>` scratch buffer".
-  `encode_packed_bool` does not (opus/machinery).
 - AGENTS.md: "nightly toolchain" - see VER-019.
 - CLAUDE.md: "Always run `brokkr fmt` before a commit". Nothing checks it.
   Proposed by opus/brokkr-config:
@@ -559,8 +432,10 @@ opus/bench, opus/machinery.
   ```
 
   or a pre-commit hook (opus/machinery).
-- LLM.md: "This separation is enforced by tooling (review), not by convention
-  alone" and the absolute claim about what development agents never see. The
+- LLM.md: the sentence claiming the separation is enforced by tooling was
+  reworded to say it is kept by working practice and not audited here. Still
+  open for the user: the absolute claim that the development agent never sees
+  third-party source, and what the document should claim. The
   check does not audit agent access or provenance; `.review.toml` holds only an
   `[_audit] id`. opus/machinery: LLM.md is byte-identical in size to brokkr's
   copy, so it is a template. codex/machinery found insufficient evidence to
@@ -601,17 +476,6 @@ nothing measurable here.
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery.
 
-## VER-047 - Published package contents are implicit
-
-`Cargo.toml` has no `include` or `exclude`, so `cargo publish` ships
-`AGENTS.md`, `CLAUDE.md`, `LLM.md`, `.review.toml` (with its audit id),
-`brokkr.toml` and `tests/` (`bench/` is a nested package, which cargo
-leaves out). brokkr's `publish_cycle` checks
-publication cycles, not contents. Proposed:
-`include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE*"]`; enforceable by
-`cargo package --list` in a script check.
-
-Reported by: opus/machinery.
 
 ## Outside the repository
 

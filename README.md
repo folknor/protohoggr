@@ -11,7 +11,7 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 This crate is optimized for **speed on well-formed protobuf data**, not for adversarial input validation. It was extracted from an OpenStreetMap PBF pipeline where throughput matters and the wire data is trusted.
 
-Concretely: varint/tag decoding validates overflow and rejects malformed sequences, but packed iterators silently end, for good, at the first malformed varint (rather than returning `Result` per element), `skip_varint` has no length limit, and `read_tag` passes through reserved wire types without filtering. These are intentional trade-offs documented in the source - see the doc comments on `PackedIter::next`, `skip_varint`, and `read_tag`.
+Concretely: varint/tag decoding rejects truncated varints and values that overflow `u64` (non-canonical but in-range encodings such as `[0x80, 0x00]` are accepted, as protobuf permits), but packed iterators silently end, for good, at the first malformed varint (rather than returning `Result` per element), `skip_varint` has no length limit, and `read_tag` passes through reserved wire types without filtering. These are intentional trade-offs documented in the source - see the doc comments on `PackedIter`, `Cursor::skip_varint`, and `Cursor::read_tag`.
 
 The 32-bit decoders (`read_sint32` and the `int32`, `uint32` and `sint32` packed iterators) truncate wider varints to 32 bits without a range check. That is not a trade-off: it is protobuf's specified conversion, and it is what lets them read values written under a wider field type.
 
@@ -20,11 +20,12 @@ The 32-bit decoders (`read_sint32` and the `int32`, `uint32` and `sint32` packed
 - **Cursor** - zero-copy reader over a byte slice: varints (LEB128), zigzag-decoded sint32/sint64, tags, length-delimited fields, fixed-width 32/64, float/double, field skipping, raw field extraction, `read_varint_unchecked` for validated regions
 - **Packed iterators** - `PackedIter`, `PackedSint64Iter`, `PackedSint32Iter`, `PackedInt64Iter`, `PackedInt32Iter`, `PackedUint32Iter`, `PackedBoolIter`
 - **Batch packed operations** - `count_packed_varints` (SSE2 SIMD on x86-64), `decode_packed_sint64_cumulative` (batch decode with cumulative sum)
-- **Varint/zigzag encoding** - `encode_varint`, `encode_varint_to_array` (into a 10-byte array, with 1-2 byte fast paths), `zigzag_encode_64`, `zigzag_encode_32`
+- **Varint/zigzag** - `encode_varint`, `encode_varint_to_array` (into a 10-byte array, with 1-2 byte fast paths), `encode_tag`, `zigzag_encode_64`, `zigzag_encode_32`, `zigzag_decode_64`, `zigzag_decode_32`
 - **Field encoders** - varint, int64, int32, uint32, bool, bytes, sint64, sint32, fixed32, fixed64, float, double - each with a skip-zero default and an `_always` variant
 - **Packed repeated field encoders** - `encode_packed_uint32`, `encode_packed_int32`, `encode_packed_sint64`, `encode_packed_sint32`, `encode_packed_bool`
+- **Errors and constants** - `WireError`, `WireResult`, and the wire types `WIRE_VARINT`, `WIRE_64BIT`, `WIRE_LEN`, `WIRE_32BIT`
 
-All encoding functions skip zero/empty/false values by default (matching protobuf conventions), with `_always` variants for fields that must always be present.
+The field encoders skip zero/empty/false values by default (matching protobuf conventions), with `_always` variants for fields that must always be present. The packed encoders write nothing for an empty slice. The varint and tag primitives (`encode_varint`, `encode_varint_to_array`, `encode_tag`) always write.
 
 ## Usage
 

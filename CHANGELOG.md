@@ -15,7 +15,12 @@
 - `encode_varint_to_slice(buf: &mut [u8], value)` (`unsafe`, contract `buf.len() >= 10`) is now the safe `encode_varint_to_array(buf: &mut [u8; 10], value)`: the array type is the whole precondition. Callers with a stack array drop the `unsafe` block; writing into a larger buffer goes through `first_chunk_mut::<10>()` or similar, a length check per call unless the optimizer removes it. The function body is unchanged; on x86-64 its release machine code was byte-identical before and after
 - `Cursor::read_varint_unchecked`'s safety contract is now only that a terminal byte (high bit clear) exists at or after the cursor before the end of the data. A terminated but malformed varint (over 10 bytes, or a 10th byte above `0x01`) is no longer a contract violation: the read stops after its terminal byte and returns an unspecified value. It used to panic with a shift overflow in debug builds. Release semantics are unchanged (the shift and its counter now wrap explicitly, as release arithmetic already did), and on x86-64 the release machine code was byte-identical
 
+### Added
+- `Debug` on `PackedIter` and the six typed packed iterators; `missing_debug_implementations` is now denied so a new public type cannot skip it
+
 ### Changed
+- The published package now lists its contents explicitly (`src/`, `README.md`, `CHANGELOG.md` and the license files), so repository tooling files and the integration tests no longer ship
+- The doc comments on `Cursor::read_varint`, `encode_varint` and `encode_varint_to_array` no longer quote speed ratios or an OSM percentage, and no longer cite a note in another repository: the figures were not retained and could not be reproduced. The scalar-over-SIMD decision is unchanged
 - The benchmarks moved out of the published package into `bench/`, an unpublished workspace member (`protohoggr-bench`). protohoggr now has no dependencies of any kind, dev included, so its tests no longer build criterion, varint-simd and their dependency trees, nor need a C compiler for criterion's `alloca`. The varint-simd comparisons are x86_64-only and the batch decoders among them need SSSE3: builds without it skip them with a stderr notice instead of failing to compile, and every varint-simd benchmark ID now ends in the instruction-set level it was built at (`avx2`, `ssse3` or `sse2`)
 
 ### Documented
@@ -26,7 +31,7 @@
 ### Added
 - `count_packed_varints(data)` - count varint terminals in a packed field; SSE2 SIMD on x86-64, scalar fallback elsewhere
 - `decode_packed_sint64_cumulative(data, base, out)` - batch decode an entire packed sint64 field with cumulative sum, replacing per-element `PackedSint64Iter` + manual accumulation; append semantics, wrapping i64 addition, mirrors packed iterator error-swallowing behavior
-- `encode_varint_to_slice(buf, value)` - `unsafe` slice-based varint encode (contract: `buf.len() >= 10`), with branchless 1-byte and 2-byte fast paths for values < 16384 (~95% of zigzag-encoded OSM way-ref deltas)
+- `encode_varint_to_slice(buf, value)` - `unsafe` slice-based varint encode (contract: `buf.len() >= 10`), with branchless 1-byte and 2-byte fast paths for values < 16384
 - `Cursor::read_varint_unchecked()` - `unsafe` infallible varint read that skips all bounds checks; safety contract requires a complete well-formed varint at the current position
 
 ## 0.3.0
@@ -71,4 +76,4 @@ First standalone release, extracted from [pbfhogg](https://github.com/folknor/pb
 ### Other
 - Zero external dependencies - pure Rust, std only
 - Dual-licensed MIT OR Apache-2.0
-- Benchmarked scalar vs varint-simd SSSE3/SSE2 - scalar wins 2-6x on decode, 1.5-3.5x on encode
+- Benchmarked scalar vs varint-simd SSSE3/SSE2 - scalar won on both decode and encode (the original ratios were measured on a benchmark later found biased in the SIMD loops' tails, 0.3.0, and were not retained)
