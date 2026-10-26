@@ -238,10 +238,6 @@ dependencies = [
 [[package]]
 name = "protohoggr"
 version = "0.4.0"
-
-[[package]]
-name = "protohoggr"
-version = "0.4.0"
 source = "git+https://github.com/folknor/protohoggr?rev=8a450a0bddf1#8a450a0bddf1901892df30061c3bf2c570dae1cb"
 
 [[package]]
@@ -250,14 +246,18 @@ version = "0.4.0"
 source = "git+https://github.com/folknor/protohoggr?rev=8a450a0bddf1901892df30061c3bf2c570dae1cb#8a450a0bddf1901892df30061c3bf2c570dae1cb"
 
 [[package]]
+name = "protohoggr"
+version = "0.5.0"
+
+[[package]]
 name = "protohoggr-bench"
 version = "0.0.0"
 dependencies = [
  "criterion",
  "libc",
- "protohoggr 0.4.0",
  "protohoggr 0.4.0 (git+https://github.com/folknor/protohoggr?rev=8a450a0bddf1)",
  "protohoggr 0.4.0 (git+https://github.com/folknor/protohoggr?rev=8a450a0bddf1901892df30061c3bf2c570dae1cb)",
+ "protohoggr 0.5.0",
  "varint-simd",
  "xxhash-rust",
 ]

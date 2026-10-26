@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 ### Fixed
 - `zigzag_encode_32` sign-extended results with bit 31 set (inputs `>= 2^30` or `<= -2^30 - 1`, e.g. `i32::MIN`) to `u64`, so `encode_sint32_field`, `encode_sint32_field_always` and `encode_packed_sint32` wrote those values as non-canonical 10-byte varints instead of 5 bytes. Both protohoggr `sint32` decoding paths truncate to 32 bits before zigzag decoding, so the values read back correctly, but data written by earlier versions can contain this form and readers should keep accepting it
