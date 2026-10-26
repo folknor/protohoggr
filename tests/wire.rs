@@ -249,7 +249,7 @@ fn zigzag_decode_roundtrip() {
 
 #[test]
 fn decode_sint32_standalone() {
-    // zigzag: 0→0, 1→-1, 2→1, 4294967294→i32::MAX, 4294967295→i32::MIN
+    // zigzag: 0->0, 1->-1, 2->1, 4294967294->i32::MAX, 4294967295->i32::MIN
     for (raw, expected) in [
         (0u64, 0i32),
         (1, -1),
@@ -396,7 +396,7 @@ fn packed_sint64_iter() {
 
 #[test]
 fn packed_sint32_iter() {
-    // zigzag: 0→0, 1→-1, 2→1, 3→-2
+    // zigzag: 0->0, 1->-1, 2->1, 3->-2
     let data = [0x00, 0x02, 0x01, 0x03];
     let vals: Vec<i32> = PackedSint32Iter::new(&data).collect();
     assert_eq!(vals, vec![0, 1, -1, -2]);
@@ -1151,7 +1151,7 @@ fn zigzag_encode_decode_roundtrip() {
 #[test]
 fn encode_tag_standalone() {
     let mut buf = Vec::new();
-    // field 1, WIRE_VARINT → (1 << 3) | 0 = 0x08
+    // field 1, WIRE_VARINT -> (1 << 3) | 0 = 0x08
     encode_tag(&mut buf, 1, WIRE_VARINT);
     assert_eq!(buf, [0x08]);
 
@@ -1161,12 +1161,12 @@ fn encode_tag_standalone() {
     assert_eq!(buf, [0x0A]);
 
     buf.clear();
-    // field 15, WIRE_VARINT → (15 << 3) | 0 = 120 = 0x78
+    // field 15, WIRE_VARINT -> (15 << 3) | 0 = 120 = 0x78
     encode_tag(&mut buf, 15, WIRE_VARINT);
     assert_eq!(buf, [0x78]);
 
     buf.clear();
-    // field 16, WIRE_VARINT → (16 << 3) | 0 = 128 → 2-byte varint
+    // field 16, WIRE_VARINT -> (16 << 3) | 0 = 128 -> 2-byte varint
     encode_tag(&mut buf, 16, WIRE_VARINT);
     assert_eq!(buf, [0x80, 0x01]);
 }
@@ -1480,7 +1480,7 @@ fn packed_bool_encode_decode_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// Encode→Decode roundtrips: field-level
+// Encode->Decode roundtrips: field-level
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2050,7 +2050,7 @@ fn cumulative_single_element() {
 
 #[test]
 fn cumulative_base_nonzero() {
-    // delta=3, base=100 → 103
+    // delta=3, base=100 -> 103
     // zigzag(3) = 6 = 0x06
     let mut out = Vec::new();
     decode_packed_sint64_cumulative(&[0x06], 100, &mut out);
@@ -2097,7 +2097,7 @@ fn cumulative_roundtrip_with_base() {
 fn cumulative_append_semantics() {
     // out already has elements - new results should be appended.
     let mut out = vec![999i64, 888];
-    // delta=1 → zigzag(1) = 2 = 0x02
+    // delta=1 -> zigzag(1) = 2 = 0x02
     decode_packed_sint64_cumulative(&[0x02], 0, &mut out);
     assert_eq!(out, vec![999, 888, 1]);
 }
@@ -2140,7 +2140,7 @@ fn cumulative_extreme_deltas() {
 #[test]
 fn cumulative_wrapping() {
     // Accumulation that crosses i64 range boundary.
-    // base = i64::MAX, delta = 1 → wraps to i64::MIN
+    // base = i64::MAX, delta = 1 -> wraps to i64::MIN
     // zigzag(1) = 2 = 0x02
     let mut out = Vec::new();
     decode_packed_sint64_cumulative(&[0x02], i64::MAX, &mut out);
@@ -2166,7 +2166,7 @@ fn cumulative_stops_on_overflow_varint() {
 fn cumulative_stops_matches_packed_iter_on_overflow() {
     // Verify that the batch decoder and PackedSint64Iter produce the same
     // output when the packed body ends with an overflowing varint.
-    let mut data = vec![0x04, 0x06]; // zigzag(2)=4, zigzag(3)=6 → deltas 2, 3
+    let mut data = vec![0x04, 0x06]; // zigzag(2)=4, zigzag(3)=6 -> deltas 2, 3
     // Append overflowing 10-byte varint.
     data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]);
     data.push(0x02); // Another valid varint that should NOT be reached.

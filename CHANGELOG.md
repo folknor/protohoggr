@@ -71,4 +71,4 @@ First standalone release, extracted from [pbfhogg](https://github.com/folknor/pb
 ### Other
 - Zero external dependencies - pure Rust, std only
 - Dual-licensed MIT OR Apache-2.0
-- Benchmarked scalar vs varint-simd SSSE3/SSE2 - scalar wins 2-6× on decode, 1.5-3.5× on encode
+- Benchmarked scalar vs varint-simd SSSE3/SSE2 - scalar wins 2-6x on decode, 1.5-3.5x on encode

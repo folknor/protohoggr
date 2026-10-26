@@ -214,174 +214,6 @@ slices. Enforceable by tests; a textlint rule against `EPSILON` in `tests/`
 
 Reported by: codex/tests, opus/tests, opus/machinery.
 
-## VER-013 - Unsafe code has no Miri lane, and `SAFETY:` comments are a convention nothing enforces
-
-`read_varint_unchecked`, `read_varint_unchecked_slow`, `encode_varint_to_array`,
-`Cursor::rest` (sound only while the `pos <= data.len()` field invariant holds)
-and the raw-pointer loads in `count_packed_varints_sse2` are tested only
-natively, where a one-byte over-read does not crash. Debug `ub_checks` on
-`get_unchecked` catch some over-reads in the dev profile; the SSE2 `ptr.add`
-reads are not covered (opus/tests). The `SAFETY:` comments in the unchecked
-decoder's slow path are argued, not checked by any tool. The unchecked
-decoder tests read hand-written fixtures that end in a terminal byte, with
-and without a trailing sentinel, so they are well shaped for Miri.
-
-`src/lib.rs` and the tests comment every unsafe block; the bench's two unsafe
-calls carry none (opus/tests, opus/machinery, opus/bench).
-
-opus/brokkr-config: Miri on the host and on foreign targets covers UB, 32-bit
-`usize` (the `*_huge_len_*` tests in `tests/wire.rs` feed a length of
-2^32 + 3, which only a 32-bit run turns into a check that `read_len_delimited`
-narrows with `try_from` rather than truncating; on 64-bit they cannot tell),
-big-endian byte order (every fixed-width
-path uses `to_le_bytes`/`from_le_bytes`; nothing tests a big-endian target)
-and the scalar fallback as a real production path (VER-014) at once, with no
-linker. Proposed
-`brokkr.toml` entries:
-
-```toml
-[[script_check]]
-name = "miri-x86_64"
-command = "cargo miri test --tests 2>&1 && echo miri-x86_64-ok"
-expect = "miri-x86_64-ok"
-stage = "background"
-diagnostics = "rustc"
-
-[[script_check]]
-name = "miri-i686"
-command = "cargo miri test --tests --target i686-unknown-linux-gnu 2>&1 && echo miri-i686-ok"
-expect = "miri-i686-ok"
-stage = "background"
-diagnostics = "rustc"
-
-[[script_check]]
-name = "miri-s390x"
-command = "cargo miri test --tests --target s390x-unknown-linux-gnu 2>&1 && echo miri-s390x-ok"
-expect = "miri-s390x-ok"
-stage = "background"
-diagnostics = "rustc"
-```
-
-Notes from opus/brokkr-config: cost unmeasured (sysroot per target on first
-run); background checks are joined before tests are listed, so Miri wall time
-adds to every check; the library has no dev-dependencies (the bench is its own
-workspace member), so `cargo miri test --tests` builds nothing external;
-Miri runs outside brokkr's execution accounting;
-brokkr has no `when = "gate"` key for `[[script_check]]`, so an expensive check
-cannot be confined to the gate without also dropping cheap ones, and script
-checks run under the markdown-only shortcut. opus/tests proposes a narrower
-periodic lane restricted to `unchecked_`, `encode_to_slice_` and
-`count_varints_`. Open intent question: is Miri's cost acceptable in the
-routine run?
-
-Enforceable: `undocumented_unsafe_blocks = "deny"` (optionally
-`multiple_unsafe_ops_per_block`) in `[lints.clippy]`; `src/` already complies.
-The Miri lane.
-
-Reported by: opus/tests, opus/machinery, opus/bench, opus/brokkr-config;
-codex/tests and codex/machinery also propose a Miri lane.
-
-## VER-014 - No lane builds a non-x86_64 target
-
-Both `count_packed_varints` implementations are now compiled, linted
-(`clippy --all-targets`) and tested on x86-64: the scalar fallback is
-`#[cfg(any(test, not(target_arch = "x86_64")))]`, and the unit tests in
-`src/lib.rs` (`count_varints_scalar_matches_reference`,
-`count_varints_sse2_matches_scalar`, `count_varints_public_matches_scalar`)
-sweep every length 0..=80 at every offset 0..16 over saturated, alternating,
-random and single-terminal / single-continuation patterns plus 4 KiB bodies.
-What remains is the non-x86-64 build configuration itself: the dispatcher's
-`not(target_arch = "x86_64")` branch and any target-dependent lint are never
-compiled by a lane. The scalar body has no target-dependent types, intrinsics
-or casts, so this is a hygiene gap, not a known hidden flaw. The library lints
-clean for `aarch64-unknown-linux-musl` (checked by hand, not a lane); the bench
-package does not build there without a cross C compiler, which criterion's
-`alloca` needs.
-
-A possible way to delete the arch split altogether was measured and rejected
-under the "no performance cost on well-formed data" constraint. Safe
-word-at-a-time SWAR (terminal flags `!w & 0x8080...80`, reduced by
-`count_ones` when `popcnt` is enabled or by a multiply-by-`0x0101...01`
-horizontal sum otherwise, with overlapping final loads instead of a byte
-tail) beat the SSE2 path by 2.5-3.6x on bodies of 1000+ bytes and by 20-60%
-on mixed lengths 0..=48 and 0..=400, on both `-Ctarget-cpu=native` (Zen 5) and
-generic x86-64. But it lost at some fixed lengths: natively at 24-64 bytes
-(for example 32 bytes, 1.62 vs 1.99 ns, +23%; 48 bytes, 1.81 vs 2.17 ns,
-+20%), and on generic x86-64 at 16 bytes (1.30 vs 1.61 ns). A safe movemask
-idiom is not lowered to `PMOVMSKB` and ran 2-5x slower. Taking that trade
-needs the user to relax the constraint.
-
-Proposed: optional cross-target lint lane, by opus/brokkr-config (the nightly
-toolchain has the aarch64-musl std; no linker needed for clippy):
-
-```toml
-[[script_check]]
-name = "clippy-aarch64-lib"
-command = "cargo clippy --target aarch64-unknown-linux-musl --lib -- -D warnings 2>&1 && echo cross-clippy-ok"
-expect = "cross-clippy-ok"
-stage = "pre-test"
-diagnostics = "rustc"
-```
-
-opus/brokkr-config notes a brokkr gap: there is no clippy-only sweep shape, and
-a `[[check]] target` for a non-native triple always runs the test phase, which
-cannot execute here (`aarch64-unknown-linux-musl` cannot run;
-`i686-unknown-linux-gnu` lacks 32-bit link files on this host). Enforceable by
-the cross lane.
-
-Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery,
-opus/bench, opus/brokkr-config.
-
-## VER-015 - Tests run only under the dev profile; consumers ship release
-
-The check builds and tests dev only (overflow checks and debug assertions on).
-pbfhogg and elivagar run release, where `get_unchecked` `ub_checks` are off (including the one in `Cursor::rest` that
-backs its field invariant); the optimizer may act on UB
-in the unsafe paths.
-
-A second, related divergence: `brokkr test NAME` defaults to release while
-`brokkr check` runs dev, and AGENTS.md documents both side by side. The first
-focused run after a check rebuilds protohoggr in release, and tests an artifact other than the one the check produced
-(opus/bench, opus/brokkr-config).
-
-The two hunters that proposed config differ:
-
-- opus/bench: set `[test] debug = true` so focused runs reuse the check's
-  debug artifacts.
-- opus/brokkr-config: `[test] debug` becomes irrelevant once both sweeps pin
-  `profile`; proposes two explicit sweeps and a complete gate profile, so
-  `brokkr test NAME` runs the name under both:
-
-```toml
-[[check]]
-name = "dev"
-profile = "dev"
-
-[[check]]
-name = "release"
-profile = "release"
-
-[test]
-default_package = "protohoggr"
-default_profile = "gate"
-gate_profile = "gate"
-
-[test.profiles.gate]
-description = "Both profiles, doctest carriers, coverage audit"
-sweeps = ["dev", "release"]
-certifies = "complete"
-```
-
-opus/brokkr-config also notes this makes `brokkr check --gate` work (today a
-load-time error because no gate profile exists), and under
-`certifies = "complete"` an unreferenced `[[check]]` entry is a load error, so
-the release sweep cannot be quietly dropped. Cost: a release clippy and a
-release build of the test graph (the library has no dependencies, so cold cost
-is the crate alone; warm: a few hundred ms, estimated). opus/machinery alternatively
-suggests a lane with `-C overflow-checks=off -C debug-assertions=off`.
-
-Reported by: opus/tests, opus/machinery, opus/bench, opus/brokkr-config.
-
 ## VER-018 - The check builds and tests a host-tuned artifact under a user-global cargo config
 
 `~/.cargo/config.toml`, outside the repo, sets for `x86_64-unknown-linux-gnu`:
@@ -650,7 +482,7 @@ opus/brokkr-config.
 (`regex_creation_in_loops`, `await_holding_lock`, `await_holding_refcell_ref`,
 `large_enum_variant`, `clone_on_ref_ptr`), which makes the list read as
 curated while lints the crate does need are absent:
-`undocumented_unsafe_blocks` and `multiple_unsafe_ops_per_block` (VER-013),
+`multiple_unsafe_ops_per_block` (`undocumented_unsafe_blocks` is now denied),
 `arithmetic_side_effects` on the cursor
 arithmetic and `indexing_slicing` on the decoder (bounded reads now go
 through `Cursor::take`, but the varint paths and `read_raw_field` still index),
@@ -662,66 +494,7 @@ paths. The list is its own enforcement.
 Reported by: opus/machinery; individual lints proposed by opus/tests,
 opus/bench, opus/brokkr-config.
 
-## Text checks
-
-## VER-029 - Open question: which characters beyond U+FFFD count as gremlins
-
-U+FFFD is banned (`[gremlins] ban` in `brokkr.toml`) and the corrupted arrow in
-`tests/wire.rs` is fixed. The rest of the ban list is the user's call. brokkr's
-gremlins check is a denylist that deliberately spares arrows, so AGENTS.md's
-"Em-dash, en-dash, strange quotes, whatever - they're all verboten" is narrower
-in practice than it reads. Still passing, in tracked files: U+2212 MINUS SIGN
-(`encode_tag` Panics doc), U+00D7 MULTIPLICATION SIGN (`read_varint` and
-`encode_varint` docs, CHANGELOG 0.2.0, bench doc), U+2026 HORIZONTAL ELLIPSIS
-(`zigzag_encode_64` doc), U+2264/U+2265 (bench doc), U+2192 RIGHTWARDS ARROW
-(many test comments, `lib.rs`, bench). `[gremlins] ban` is scan-only (no
-`--fix-gremlins` ASCII mapping for extra codepoints), so each hit is fixed by
-hand once. Fallback if a full ASCII rule is wanted: a short test in `tests/`
-rejecting any byte >= 0x80 in tracked text files. Separately, the scanner uses
-a fixed extension list, so extensionless files such as `LICENSE` are not
-scanned. An earlier `--fix-gremlins` run rewrote the bench doc's check and
-cross marks to `[x]` and `[ ]`, a silent change of meaning worth rechecking.
-
-Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery,
-opus/brokkr-config.
-
 ## Documentation claims
-
-## VER-030 - README's Usage example and any doc examples are compiled by nothing
-
-The check runs `cargo test --tests`, which excludes doctests (`doc_carrier:
-false` in the plan). There are no doctests today, so the gap is latent, but
-README's Usage block has never been compiled by anything; opus/brokkr-config
-reads it as compiling, with an unused `wire_type` binding that shows it has not
-run under `-D warnings`. brokkr's default `[test] doctests = false` is
-justified in its manual by "CI runs under nextest"; this repo has no CI, so
-that premise does not hold (opus/brokkr-config).
-
-Proposed: `#![doc = include_str!("../README.md")]` in `src/lib.rs` (or a
-`#[cfg(doctest)]` module) and a doctest-running check:
-`[test] doctests = true` plus the complete gate profile in VER-015, whose
-doctest carrier accounting reports a missing rustdoc stream as `missing`
-(opus/brokkr-config). Caveat: markdown never counts as code for brokkr's
-markdown-only shortcut, so a README-only edit would not trigger the build
-unless a complete default profile waives the shortcut (unverified). Unverified:
-whether a carrier with zero doctests passes as `no tests ran`.
-
-Reported by: codex/machinery, opus/tests, opus/machinery, opus/brokkr-config.
-
-## VER-031 - Intra-doc links and other rustdoc lints are evaluated nowhere
-
-The rustdoc phase prints `started` and does nothing, because `brokkr.toml` has
-no `[rustdoc]` table. `src/lib.rs` has intra-doc links (`[`read_varint`]
-(Cursor::read_varint)`, `[`zigzag_encode_32`]`, `[`Cursor::read_sint32`]`,
-`[`PackedSint32Iter`]`, `[`zigzag_decode_32`]`) that a rename would break
-silently; clippy does not run rustdoc's link resolver. Private items carry doc
-comments too.
-
-Proposed by opus/brokkr-config: `[rustdoc]` with
-`document_private_items = true`; sub-second on nightly. Enforced by the rustdoc
-phase.
-
-Reported by: opus/machinery, opus/brokkr-config.
 
 ## VER-032 - README and AGENTS.md hand-maintain inventories the code defines
 
@@ -764,9 +537,6 @@ opus/bench, opus/machinery.
 
 ## VER-037 - AGENTS.md, CLAUDE.md and LLM.md statements that are false or drift
 
-- AGENTS.md: "`brokkr check` # gremlins + clippy + all tests". Doctests are
-  excluded, benches are only linted, there is no fmt check. Reword without
-  enumerating (opus/tests, opus/machinery, opus/brokkr-config).
 - AGENTS.md: "30+ lints set to `deny`". A drifting count; "every lint in
   `[lints.clippy]` is denied" says it without drifting (opus/machinery,
   opus/brokkr-config).
@@ -815,22 +585,6 @@ opus/bench, opus/machinery.
 Reported by: codex/machinery, opus/tests, opus/machinery, opus/brokkr-config.
 
 ## Repository and check machinery
-
-## VER-040 - The default check sweep is labelled `all-features` for a crate with no features
-
-With no `[[check]]` entry brokkr synthesizes one sweep named `all-features`
-and passes `--all-features` to clippy and test. The crate has no features, so
-the label reads as coverage of a feature matrix that does not exist, and it
-fails open: a feature added later silently joins the only sweep and nothing
-ever builds without it. The brokkr manual rejects `features = "all"` in
-`[[check]]` for this reason (opus/brokkr-config). opus/tests: `--all-features`
-is a no-op sweep here.
-
-Proposed: explicit `[[check]]` entries (VER-015); a `no_default_features`
-entry once a feature exists. Enforced by the presence of `[[check]]`.
-opus/brokkr-config also lists, as free: `[manifest] sort_dependencies = true`.
-
-Reported by: opus/tests, opus/brokkr-config.
 
 ## VER-042 - The lib unit-test harness holds only the `count_packed_varints` tests
 

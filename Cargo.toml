@@ -73,6 +73,7 @@ must_use_candidate = "deny"
 doc_markdown = "deny"
 inline_always = "deny"
 missing_safety_doc = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [workspace.lints.rust]
 missing_docs = "deny"

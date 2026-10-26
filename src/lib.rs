@@ -4,8 +4,17 @@
 //! decoder, field-level encoders, and packed repeated field helpers. Pure Rust,
 //! std only: no external crate dependencies of any kind, dev included.
 
+// Doc examples are held to the same no-warnings bar as the code they show.
+#![doc(test(attr(deny(warnings))))]
+
 use std::fmt;
 use std::iter::FusedIterator;
+
+// README's code blocks, compiled and run as doctests of this crate. The item
+// exists only when rustdoc collects doctests, so it is never API or docs.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -238,7 +247,7 @@ impl<'a> Cursor<'a> {
     ///
     /// This scalar implementation intentionally does NOT use SIMD. Benchmarked
     /// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSSE3): scalar is
-    /// 2.3× faster than SIMD batch4 decode for 1-byte varints (the dominant
+    /// 2.3x faster than SIMD batch4 decode for 1-byte varints (the dominant
     /// OSM case - dense node id/lat/lon deltas) and tied for 3-byte varints.
     /// The 1-byte fast path below is perfectly predicted by the CPU branch
     /// predictor, beating SSE shuffle + mask overhead. See `notes/SIMD.md` in
@@ -1150,7 +1159,7 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
             if shift == 63 {
                 // 10th byte: only the low bit is valid for u64. If b > 1,
                 // this is an overflow - stop silently, matching PackedIter
-                // which delegates to read_varint → Err → .ok() → None.
+                // which delegates to read_varint -> Err -> .ok() -> None.
                 if b > 1 {
                     return;
                 }
@@ -1188,7 +1197,7 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
 ///
 /// This scalar implementation intentionally does NOT use SIMD. Benchmarked
 /// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSE2): scalar is
-/// 3.5× faster for 1-byte varints and 1.5× faster for 3-byte varints.
+/// 3.5x faster for 1-byte varints and 1.5x faster for 3-byte varints.
 /// See `notes/SIMD.md` in pbfhogg (dd7f69a) (P3-20, closed).
 #[inline]
 #[expect(clippy::cast_possible_truncation)]
@@ -1249,7 +1258,7 @@ pub fn encode_varint_to_array(buf: &mut [u8; 10], value: u64) -> usize {
 
 /// Zigzag-encode a signed 64-bit integer for `sint64` fields.
 ///
-/// Maps: 0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, …
+/// Maps: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4, ...
 #[inline]
 #[must_use]
 #[expect(clippy::cast_sign_loss)]
@@ -1280,7 +1289,7 @@ pub fn zigzag_encode_32(v: i32) -> u32 {
 /// # Panics
 ///
 /// Panics if `field` is 0 or exceeds `0x1FFF_FFFF` (the protobuf maximum of
-/// 2^29 − 1), or if `wire_type` exceeds 7 (only 3 bits are available).
+/// 2^29 - 1), or if `wire_type` exceeds 7 (only 3 bits are available).
 #[inline]
 pub fn encode_tag(buf: &mut Vec<u8>, field: u32, wire_type: u32) {
     assert!(
@@ -1600,17 +1609,25 @@ mod tests {
     }
 
     /// Backing buffers of `MAX_OFFSET + MAX_LEN` bytes, one per pattern.
+    ///
+    /// Under Miri only the first: which bytes are read depends on the length
+    /// and offset alone, never on their values, so one pattern already makes
+    /// every load the sweep can make, and the rest would multiply Miri's run
+    /// time by two hundred to re-check counts the native run checks.
     fn patterns() -> Vec<Vec<u8>> {
         let n = MAX_OFFSET + MAX_LEN;
-        let mut out = vec![
+        let mut out = vec![random_bytes(n, 0x1234_5678)];
+        if cfg!(miri) {
+            return out;
+        }
+        out.extend([
             vec![0x00; n],
             vec![0xFF; n],
             (0..n)
                 .map(|i| if i % 2 == 0 { 0x80 } else { 0x7F })
                 .collect(),
-            random_bytes(n, 0x1234_5678),
             random_bytes(n, 0x9E37_79B9),
-        ];
+        ]);
         // A lone terminal, and a lone continuation byte, at every position.
         for i in 0..n {
             let mut one_terminal = vec![0xFF; n];

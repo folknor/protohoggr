@@ -1,11 +1,12 @@
 project = "protohoggr"
 
+# ASCII only in every scanned file, LICENSE files and .gitignore included.
+# The ban is scan-only: --fix-gremlins rewrites brokkr's built-in set, every
+# other hit is fixed by hand.
 [gremlins]
-ban = ["U+FFFD"]
+ban = ["U+0080..U+10FFFF"]
+include = ["LICENSE", "LICENSE-MIT", ".gitignore"]
 
-# "No external dependencies" (README, AGENTS.md, crate doc): an empty allow
-# list fails closed for every kind - normal, build and dev - so the claim holds
-# for contributors as well as consumers. Bench dependencies belong in bench/.
 [[textlint]]
 name = "assert-error-kind"
 pattern = '\.is_err\(\)'
@@ -13,8 +14,106 @@ paths = ["tests/**/*.rs"]
 region = "code"
 message = "assert the WireError kind (assert_eq!(read, Err(WireError::...))), not just is_err(): a test that accepts any error passes for the wrong reason"
 
+# "No external dependencies" (README, AGENTS.md, crate doc): an empty allow
+# list fails closed for every kind - normal, build and dev - so the claim holds
+# for contributors as well as consumers. Bench dependencies belong in bench/.
 [[dependency_rule]]
 name = "no-external-dependencies"
 from = "protohoggr"
 allow = []
 
+# The library's tests run under both profiles: consumers build release (fat
+# LTO), where overflow checks, debug assertions and the ub_checks behind
+# get_unchecked are off. No default_profile, so plain `brokkr check` runs
+# every entry below and `brokkr test NAME` runs the name under dev and release.
+[[check]]
+name = "dev"
+profile = "dev"
+
+[[check]]
+name = "release"
+profile = "release"
+
+# README's Usage block is a doctest of the crate (see src/lib.rs). Shaped as
+# the workspace minus the bench so a complete gate has a workspace-wide
+# doctest carrier; default-members alone is narrower than the workspace.
+[[check]]
+name = "doctests"
+profile = "dev"
+doc_only = true
+test_exclude_packages = ["protohoggr-bench"]
+
+# Linted and documented, never tested: the cfg(not(target_arch = "x86_64"))
+# dispatch to the scalar count_packed_varints. Library only - the bench needs
+# a cross C compiler for criterion there.
+[[lint_sweep]]
+name = "aarch64"
+target = "aarch64-unknown-linux-musl"
+packages = ["protohoggr"]
+
+# The bench is outside default-members, so no [[check]] entry compiles it.
+# These keep its benches, examples and library linted; the feature shapes
+# compile every slot branch of examples/ab.rs.
+[[lint_sweep]]
+name = "bench"
+packages = ["protohoggr-bench"]
+
+[[lint_sweep]]
+name = "bench-swap"
+packages = ["protohoggr-bench"]
+features = ["swap"]
+when = "gate"
+
+[[lint_sweep]]
+name = "bench-aa"
+packages = ["protohoggr-bench"]
+features = ["aa"]
+when = "gate"
+
+[[lint_sweep]]
+name = "bench-swap-aa"
+packages = ["protohoggr-bench"]
+features = ["swap", "aa"]
+when = "gate"
+
+[rustdoc]
+document_private_items = true
+
+[test]
+gate_profile = "gate"
+
+# `brokkr check --gate`: the plain check plus doctest carriers for both
+# profiles, the coverage audit, the gate-only bench shapes and Miri.
+[test.profiles.gate]
+description = "Landing gate: run before every commit"
+sweeps = ["dev", "release", "doctests"]
+certifies = "complete"
+
+# Miri runs the whole test suite on three targets: x86_64 for the SSE2
+# raw-pointer path, i686 for 32-bit usize, s390x for big-endian byte order.
+# The last two also run the scalar count_packed_varints through the
+# non-x86_64 dispatcher. Post-test, not background: a background Miri holds
+# up the clippy phase on this host rather than overlapping it.
+[[script_check]]
+name = "miri-x86_64"
+command = "cargo miri test --tests --target x86_64-unknown-linux-gnu 2>&1 && echo miri-x86_64-ok"
+expect = "miri-x86_64-ok"
+stage = "post-test"
+diagnostics = "rustc"
+when = "gate"
+
+[[script_check]]
+name = "miri-i686"
+command = "cargo miri test --tests --target i686-unknown-linux-gnu 2>&1 && echo miri-i686-ok"
+expect = "miri-i686-ok"
+stage = "post-test"
+diagnostics = "rustc"
+when = "gate"
+
+[[script_check]]
+name = "miri-s390x"
+command = "cargo miri test --tests --target s390x-unknown-linux-gnu 2>&1 && echo miri-s390x-ok"
+expect = "miri-s390x-ok"
+stage = "post-test"
+diagnostics = "rustc"
+when = "gate"

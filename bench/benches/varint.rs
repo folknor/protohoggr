@@ -8,8 +8,8 @@
 //!
 //! ## Decode scenarios
 //! 1. scalar    - current `PackedSint64Iter`
-//! 2. `simd_batch` - `decode_four_unsafe<u16>` for ≤2-byte varints (small deltas),
-//!    `decode_two_unsafe<u32>` for ≤5-byte varints (large deltas)
+//! 2. `simd_batch` - `decode_four_unsafe<u16>` for varints of at most 2 bytes
+//!    (small deltas), `decode_two_unsafe<u32>` for at most 5 bytes (large deltas)
 //! 3. `simd_single` - safe `decode::<u64>` one at a time
 //!
 //! ## Encode scenarios
@@ -30,11 +30,11 @@
 //! different levels.
 //!
 //! ## Type constraints on batch decode
-//!   `decode_four_unsafe` reads 16 bytes and requires the sum of max varint bytes ≤ 16.
-//!   u16 (max 3 bytes) → 4×3=12 [x], u32 (max 5 bytes) → 4×5=20 [ ].
-//!   `decode_two_unsafe` → u32: 2×5=10 [x], u64: 2×10=20 [ ].
+//!   `decode_four_unsafe` reads 16 bytes and requires the sum of max varint bytes <= 16.
+//!   u16 (max 3 bytes): 4x3=12, fits; u32 (max 5 bytes): 4x5=20, does not.
+//!   `decode_two_unsafe`: u32 2x5=10, fits; u64 2x10=20, does not.
 //!   So for sint64 values that happen to fit in u32 (most OSM deltas), the best batch
-//!   decode is `decode_two<u32>`; for tiny deltas (≤u16), `decode_four<u16>` is available.
+//!   decode is `decode_two<u32>`; for tiny deltas (fitting u16), `decode_four<u16>` is available.
 
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, measurement::WallTime};
 use protohoggr::{PackedSint64Iter, encode_packed_sint64};
@@ -177,6 +177,10 @@ mod simd {
                 let batch_end = data_end.saturating_sub(16); // safe zone for 16-byte reads
                 while pos < batch_end {
                     let ptr = d[pos..].as_ptr();
+                    // SAFETY: the read is 16 bytes from `pos`, and
+                    // `pos < batch_end <= d.len() - 32` keeps it inside `d`;
+                    // SSSE3 is enabled at compile time (the cfg above), and
+                    // 4 x u16 needs at most 12 of the 16 bytes.
                     let (a, bv, cv, dv, la, lb, lc, ld, _overflow): (
                         u16,
                         u16,
@@ -209,6 +213,10 @@ mod simd {
                 let batch_end = data_end.saturating_sub(16);
                 while pos < batch_end {
                     let ptr = d[pos..].as_ptr();
+                    // SAFETY: the read is 16 bytes from `pos`, and
+                    // `pos < batch_end <= d.len() - 32` keeps it inside `d`;
+                    // SSSE3 is enabled at compile time (the cfg above), and
+                    // 2 x u32 needs at most 10 of the 16 bytes.
                     let (a, bv, la, lb): (u32, u32, u8, u8) =
                         unsafe { varint_simd::decode::decode_two_unsafe(ptr) };
                     black_box(zigzag_decode_64(u64::from(a)));

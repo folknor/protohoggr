@@ -29,19 +29,22 @@ All encoding functions skip zero/empty/false values by default (matching protobu
 ## Usage
 
 ```rust
-use protohoggr::{Cursor, encode_varint, encode_bytes_field};
+use protohoggr::{Cursor, WIRE_VARINT, encode_bytes_field};
 
 // Decode
 let data = [0x08, 0xac, 0x02]; // field 1, varint 300
 let mut cursor = Cursor::new(&data);
 let (field, wire_type) = cursor.read_tag().unwrap().unwrap();
-let value = cursor.read_varint().unwrap();
-assert_eq!((field, value), (1, 300));
+assert_eq!((field, wire_type), (1, WIRE_VARINT));
+assert_eq!(cursor.read_varint().unwrap(), 300);
 
 // Encode
 let mut buf = Vec::new();
 encode_bytes_field(&mut buf, 1, b"hello");
+assert_eq!(buf, b"\x0a\x05hello");
 ```
+
+The example is compiled and run as a doctest of the crate.
 
 ## License
 

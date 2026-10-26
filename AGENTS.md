@@ -13,21 +13,31 @@ plus `examples/ab.rs`, a same-binary A/B against a pinned baseline revision.
 How to measure, and why it is done that way, is in `reference/performance.md`.
 
 Benchmarks live in `bench/`, a separate unpublished workspace member
-(`protohoggr-bench`) that owns criterion and varint-simd, so the library's own
-check never compiles them. `default-members` keeps `brokkr check` on the
-library alone; lint the bench explicitly with `brokkr clippy -p protohoggr-bench`
-and run it with `brokkr bench varint`. The varint-simd batch comparisons need
-SSSE3 and are left out (with a stderr notice) on builds without it.
+(`protohoggr-bench`) that owns criterion and varint-simd, so the library's
+tests never compile them. `default-members` keeps the tested sweeps on the
+library alone; `brokkr check` lints and documents the bench through its own
+`[[lint_sweep]]` entries. Run it with `brokkr bench varint`. The varint-simd
+batch comparisons need SSSE3 and are left out (with a stderr notice) on builds
+without it.
 
 ## Build & test
 
-Use `brokkr` (not raw `cargo`).
+Use `brokkr` (not raw `cargo`). `brokkr.toml` is the source of truth for what
+each command runs.
 
 ```sh
-brokkr check       # gremlins + clippy + all tests. Replaces build/test/clippy
-brokkr test <NAME> # run one test by substring filter
-brokkr fmt         # format
+brokkr check        # edit loop
+brokkr check --gate # landing gate: everything the edit loop runs, plus the slow lanes
+brokkr test <NAME>  # run one test by substring filter, under dev and release
+brokkr fmt          # format
 ```
+
+A green `brokkr check --gate` on the exact contents being committed is required
+before every commit. Plain `brokkr check` skips the build on a markdown-only
+tree, so a README edit's doctest is compiled only by the gate (or
+`brokkr check --force-rust`). Miri needs the `miri` and `rust-src` rustup
+components; the aarch64 lint sweep needs the `aarch64-unknown-linux-musl`
+target.
 
 ## Code conventions
 
@@ -37,6 +47,7 @@ brokkr fmt         # format
   - `unwrap_used` is denied - enforced via `Cargo.toml`
   - `cast_sign_loss`, `cast_possible_truncation`, `cast_possible_wrap` are denied - use `#[expect(...)]` locally with care (`allow_attributes` is denied, and a stale expectation fails the build)
   - `cognitive_complexity` and `too_many_lines` are denied - keep functions small
+  - `undocumented_unsafe_blocks` is denied - every `unsafe` block carries a `// SAFETY:` comment; the gate runs the test suite under Miri to check the unsafe paths for UB
 - Test module uses `#[allow(clippy::unwrap_used)]` so `.unwrap()` is fine in tests
 - Use `WireResult<T>` / `WireError` for fallible operations, not panics
 - Encoding functions skip zero/empty/false values by default (protobuf convention); `_always` variants write unconditionally
@@ -47,7 +58,7 @@ brokkr fmt         # format
 
 ### General rules
 
-- Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
+- Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten. `brokkr.toml` bans every non-ASCII character in scanned files.
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
 
