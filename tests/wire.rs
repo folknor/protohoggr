@@ -30,13 +30,19 @@ fn decode_varint_multi_byte() {
 #[test]
 fn decode_varint_truncated() {
     let mut c = Cursor::new(&[0x80]);
-    assert!(c.read_varint().is_err());
+    assert_eq!(c.read_varint(), Err(WireError::TruncatedVarint));
+    assert!(c.is_empty());
+    // Nine continuation bytes then EOF: truncated, not an overflow, since the
+    // tenth byte that would decide overflow never arrives.
+    let mut c = Cursor::new(&[0x80; 9]);
+    assert_eq!(c.read_varint(), Err(WireError::TruncatedVarint));
+    assert!(c.is_empty());
 }
 
 #[test]
 fn decode_varint_empty() {
     let mut c = Cursor::new(&[]);
-    assert!(c.read_varint().is_err());
+    assert_eq!(c.read_varint(), Err(WireError::TruncatedVarint));
 }
 
 #[test]
@@ -52,7 +58,7 @@ fn decode_varint_10byte_overflow() {
     // Same as above but final byte is 0x02 - overflows u64
     let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
     let mut c = Cursor::new(&data);
-    assert!(c.read_varint().is_err());
+    assert_eq!(c.read_varint(), Err(WireError::VarintOverflow));
 }
 
 #[test]
@@ -60,17 +66,40 @@ fn decode_varint_10byte_overflow_high() {
     // Final byte 0x7F - way beyond u64
     let data = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F];
     let mut c = Cursor::new(&data);
-    assert!(c.read_varint().is_err());
+    assert_eq!(c.read_varint(), Err(WireError::VarintOverflow));
 }
 
+/// The tenth byte decides: a valid low bit with no continuation (`0x00`,
+/// `0x01`) completes a `u64`, anything else is an overflow there and then.
 #[test]
-fn decode_varint_11byte_rejected() {
-    // 11 continuation bytes - too long regardless of final byte
-    let data = [
-        0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
-    ];
-    let mut c = Cursor::new(&data);
-    assert!(c.read_varint().is_err());
+fn decode_varint_10th_byte_decides() {
+    for (last, expected) in [(0x00u8, Ok(0)), (0x01, Ok(1u64 << 63))] {
+        let mut data = vec![0x80; 9];
+        data.push(last);
+        let mut c = Cursor::new(&data);
+        assert_eq!(c.read_varint(), expected, "last={last:#x}");
+        assert!(c.is_empty(), "last={last:#x}");
+    }
+}
+
+/// A continuation byte in tenth position, even `0x81` whose payload bit is
+/// valid, cannot start an eleventh byte: no `u64` varint is longer than ten.
+/// The input ends right there, so reading on would report truncation; an
+/// overflow proves the decoder rejects at the tenth byte without looking for
+/// an eleventh.
+#[test]
+fn decode_varint_10th_byte_continuation_is_overflow() {
+    for (fill, last) in [(0x80u8, 0x80u8), (0xFF, 0x81), (0x80, 0x81)] {
+        let mut data = vec![fill; 9];
+        data.push(last);
+        let mut c = Cursor::new(&data);
+        assert_eq!(
+            c.read_varint(),
+            Err(WireError::VarintOverflow),
+            "fill={fill:#x} last={last:#x}"
+        );
+        assert!(c.is_empty(), "fill={fill:#x} last={last:#x}");
+    }
 }
 
 /// A 10-byte varint whose last byte overflows `u64`, as a terminal byte
@@ -84,7 +113,11 @@ fn decode_varint_overflow_abandons_input() {
         let mut data = vec![0xFF; 9];
         data.extend_from_slice(&[last, 0x08, 0x01]);
         let mut c = Cursor::new(&data);
-        assert!(c.read_varint().is_err(), "last={last:#x}");
+        assert_eq!(
+            c.read_varint(),
+            Err(WireError::VarintOverflow),
+            "last={last:#x}"
+        );
         assert!(c.is_empty(), "last={last:#x}");
         assert_eq!(c.remaining(), 0, "last={last:#x}");
         assert_eq!(c.position(), data.len(), "last={last:#x}");
@@ -97,7 +130,7 @@ fn decode_varint_truncated_leaves_cursor_at_end() {
     let data = [0x08, 0x80, 0x80];
     let mut c = Cursor::new(&data);
     assert_eq!(c.read_varint().unwrap(), 8);
-    assert!(c.read_varint().is_err());
+    assert_eq!(c.read_varint(), Err(WireError::TruncatedVarint));
     assert_eq!(c.position(), data.len());
 }
 
@@ -109,16 +142,16 @@ fn composed_readers_malformed_vs_rejected_value() {
     overflow.extend_from_slice(&[0x02, 0x08, 0x01]);
 
     let mut c = Cursor::new(&overflow);
-    assert!(c.read_tag().is_err());
+    assert_eq!(c.read_tag(), Err(WireError::VarintOverflow));
     assert!(c.is_empty());
     let mut c = Cursor::new(&overflow);
-    assert!(c.read_len_delimited().is_err());
+    assert_eq!(c.read_len_delimited(), Err(WireError::VarintOverflow));
     assert!(c.is_empty());
     let mut c = Cursor::new(&overflow);
-    assert!(c.read_varint_u32().is_err());
+    assert_eq!(c.read_varint_u32(), Err(WireError::VarintOverflow));
     assert!(c.is_empty());
     let mut c = Cursor::new(&overflow);
-    assert!(c.read_sint64().is_err());
+    assert_eq!(c.read_sint64(), Err(WireError::VarintOverflow));
     assert!(c.is_empty());
 
     // u32::MAX + 1 is a well-formed 5-byte varint: consumed, then rejected.
@@ -127,15 +160,15 @@ fn composed_readers_malformed_vs_rejected_value() {
     let used = too_big.len();
     too_big.extend_from_slice(&[0x08, 0x01]);
     let mut c = Cursor::new(&too_big);
-    assert!(c.read_varint_u32().is_err());
+    assert_eq!(c.read_varint_u32(), Err(WireError::U32Overflow));
     assert_eq!(c.position(), used);
     let mut c = Cursor::new(&too_big);
-    assert!(c.read_tag().is_err());
+    assert_eq!(c.read_tag(), Err(WireError::U32Overflow));
     assert_eq!(c.position(), used);
 
     // Tag with field number 0: consumed, then rejected.
     let mut c = Cursor::new(&[0x00, 0x08, 0x01]);
-    assert!(c.read_tag().is_err());
+    assert_eq!(c.read_tag(), Err(WireError::FieldNumberZero));
     assert_eq!(c.position(), 1);
 }
 
@@ -152,7 +185,8 @@ fn decode_varint_u32_overflow() {
     let mut buf = Vec::new();
     encode_varint(&mut buf, u64::from(u32::MAX) + 1);
     let mut c = Cursor::new(&buf);
-    assert!(c.read_varint_u32().is_err());
+    assert_eq!(c.read_varint_u32(), Err(WireError::U32Overflow));
+    assert!(c.is_empty());
 }
 
 #[test]
@@ -169,7 +203,8 @@ fn decode_read_tag_oversized_varint() {
     let mut buf = Vec::new();
     encode_varint(&mut buf, u64::from(u32::MAX) + 1);
     let mut c = Cursor::new(&buf);
-    assert!(c.read_tag().is_err());
+    assert_eq!(c.read_tag(), Err(WireError::U32Overflow));
+    assert!(c.is_empty());
 }
 
 #[test]
@@ -177,12 +212,15 @@ fn decode_read_tag_field_zero() {
     // Tag varint where field_number = 0 is invalid per protobuf spec.
     // Wire type bits 0-2 can be anything; field bits 3+ are all zero.
     for wire_type in 0..=7u8 {
-        let data = [wire_type];
+        let data = [wire_type, 0x08];
         let mut c = Cursor::new(&data);
-        assert!(
-            c.read_tag().is_err(),
-            "tag with field 0, wire_type {wire_type} should error"
+        assert_eq!(
+            c.read_tag(),
+            Err(WireError::FieldNumberZero),
+            "tag with field 0, wire_type {wire_type}"
         );
+        // The rejected tag is consumed, nothing after it.
+        assert_eq!(c.position(), 1, "wire_type {wire_type}");
     }
 }
 
@@ -270,18 +308,79 @@ fn cursor_clone_independent() {
 // WireError: Display and Error
 // ---------------------------------------------------------------------------
 
-#[test]
-fn wire_error_display() {
-    let err = Cursor::new(&[]).read_varint().unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("wire format error:"), "got: {msg}");
+/// Run one read on literal input that fails with `kind`. The match has no
+/// wildcard, so a new kind does not compile until it gets an input here, and
+/// `WireError::ALL` is generated from the enum itself, so the test below
+/// walks every kind.
+fn produce(kind: WireError) -> WireResult<()> {
+    match kind {
+        WireError::TruncatedVarint => Cursor::new(&[0x80]).read_varint().map(drop),
+        WireError::VarintOverflow => Cursor::new(&[0xFF; 10]).read_varint().map(drop),
+        WireError::U32Overflow => Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x10])
+            .read_varint_u32()
+            .map(drop),
+        WireError::FieldNumberZero => Cursor::new(&[0x02]).read_tag().map(drop),
+        WireError::LengthPastEnd => Cursor::new(&[0x02, 0xAA]).read_len_delimited().map(drop),
+        WireError::TruncatedFixed32 => Cursor::new(&[0; 3]).read_fixed32().map(drop),
+        WireError::TruncatedFixed64 => Cursor::new(&[0; 7]).read_fixed64().map(drop),
+        WireError::UnknownWireType => Cursor::new(&[0; 16]).skip_field(3),
+    }
 }
 
 #[test]
-fn wire_error_is_error() {
-    let err = Cursor::new(&[]).read_varint().unwrap_err();
-    // Verify it implements std::error::Error (source() returns None for simple errors)
-    let _: &dyn std::error::Error = &err;
+fn wire_error_every_kind_from_input() {
+    for &kind in WireError::ALL {
+        assert_eq!(produce(kind), Err(kind));
+    }
+}
+
+/// The full `Display` text of every kind, as literals: deriving the expected
+/// text from `as_str` would let both change wrongly together.
+#[test]
+fn wire_error_display() {
+    for &kind in WireError::ALL {
+        let expected = match kind {
+            WireError::TruncatedVarint => "wire format error: truncated varint",
+            WireError::VarintOverflow => "wire format error: varint overflows u64",
+            WireError::U32Overflow => "wire format error: varint overflows u32",
+            WireError::FieldNumberZero => "wire format error: tag has field number 0",
+            WireError::LengthPastEnd => {
+                "wire format error: length-delimited field extends past end"
+            }
+            WireError::TruncatedFixed32 => "wire format error: truncated 32-bit fixed-width value",
+            WireError::TruncatedFixed64 => "wire format error: truncated 64-bit fixed-width value",
+            WireError::UnknownWireType => "wire format error: unknown wire type",
+        };
+        assert_eq!(kind.to_string(), expected);
+    }
+}
+
+/// `as_str` is what downstream error types carry, so it is pinned on its
+/// own, not only through `Display`.
+#[test]
+fn wire_error_as_str() {
+    for &kind in WireError::ALL {
+        let expected = match kind {
+            WireError::TruncatedVarint => "truncated varint",
+            WireError::VarintOverflow => "varint overflows u64",
+            WireError::U32Overflow => "varint overflows u32",
+            WireError::FieldNumberZero => "tag has field number 0",
+            WireError::LengthPastEnd => "length-delimited field extends past end",
+            WireError::TruncatedFixed32 => "truncated 32-bit fixed-width value",
+            WireError::TruncatedFixed64 => "truncated 64-bit fixed-width value",
+            WireError::UnknownWireType => "unknown wire type",
+        };
+        assert_eq!(kind.as_str(), expected);
+    }
+}
+
+/// `WireError` is a leaf: no kind wraps a lower-level cause.
+#[test]
+fn wire_error_has_no_source() {
+    for &kind in WireError::ALL {
+        let err: &dyn std::error::Error = &kind;
+        assert!(err.source().is_none(), "{kind:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,12 +716,59 @@ fn skip_field_len_delimited() {
     assert!(c.is_empty());
 }
 
+/// Wire types a tag can carry, or a caller can pass, that `skip_field` and
+/// `read_raw_field` reject: the group types 3 and 4, the unassigned 6 and 7,
+/// and values no three-bit tag field can hold.
+const UNKNOWN_WIRE_TYPES: [u32; 6] = [3, 4, 6, 7, 8, u32::MAX];
+
+/// Sixteen zero bytes are a complete value for every accepted wire type
+/// (a one-byte varint, a zero-length payload, 4 and 8 fixed bytes), so a
+/// rejection on this input cannot be truncation.
+const VALID_FOR_ANY_WIRE_TYPE: [u8; 16] = [0; 16];
+
 #[test]
 fn skip_field_unknown_wire_type() {
-    let mut c = Cursor::new(&[]);
-    assert!(c.skip_field(3).is_err());
-    assert!(c.skip_field(4).is_err());
-    assert!(c.skip_field(6).is_err());
+    for wire in UNKNOWN_WIRE_TYPES {
+        let mut c = Cursor::new(&VALID_FOR_ANY_WIRE_TYPE);
+        assert_eq!(
+            c.skip_field(wire),
+            Err(WireError::UnknownWireType),
+            "wire={wire}"
+        );
+        assert_eq!(c.position(), 0, "wire={wire}");
+    }
+    // The same input is accepted for every known type.
+    for wire in [WIRE_VARINT, WIRE_64BIT, WIRE_LEN, WIRE_32BIT] {
+        Cursor::new(&VALID_FOR_ANY_WIRE_TYPE)
+            .skip_field(wire)
+            .unwrap();
+    }
+}
+
+/// The varint skip scans for a terminal byte without decoding, so it accepts
+/// varints that `read_varint` rejects as an overflow: a tenth byte above
+/// `0x01`, and an overlong run of more than ten bytes. A trailing byte shows
+/// it stops right after the terminal byte.
+#[test]
+fn skip_field_varint_accepts_overflowing_varint() {
+    let mut overflow = vec![0xFF; 9];
+    overflow.push(0x02);
+    let mut overlong = vec![0x80; 11];
+    overlong.push(0x00);
+    for varint in [overflow, overlong] {
+        let mut data = varint.clone();
+        data.push(0x08);
+        assert_eq!(
+            Cursor::new(&data).read_varint(),
+            Err(WireError::VarintOverflow)
+        );
+        let mut c = Cursor::new(&data);
+        c.skip_field(WIRE_VARINT).unwrap();
+        assert_eq!(c.position(), varint.len());
+        let mut c = Cursor::new(&data);
+        assert_eq!(c.read_raw_field(WIRE_VARINT).unwrap(), &varint[..]);
+        assert_eq!(c.position(), varint.len());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,25 +818,40 @@ fn read_raw_field_len_delimited() {
 fn read_raw_field_truncated_varint() {
     // Continuation byte with no terminator
     let mut c = Cursor::new(&[0x80]);
-    assert!(c.read_raw_field(WIRE_VARINT).is_err());
+    assert_eq!(
+        c.read_raw_field(WIRE_VARINT),
+        Err(WireError::TruncatedVarint)
+    );
+    assert!(c.is_empty());
 }
 
 #[test]
 fn read_raw_field_empty_varint() {
     let mut c = Cursor::new(&[]);
-    assert!(c.read_raw_field(WIRE_VARINT).is_err());
+    assert_eq!(
+        c.read_raw_field(WIRE_VARINT),
+        Err(WireError::TruncatedVarint)
+    );
 }
 
 #[test]
 fn read_raw_field_truncated_64bit() {
     let mut c = Cursor::new(&[0x01, 0x02, 0x03]);
-    assert!(c.read_raw_field(WIRE_64BIT).is_err());
+    assert_eq!(
+        c.read_raw_field(WIRE_64BIT),
+        Err(WireError::TruncatedFixed64)
+    );
+    assert_eq!(c.position(), 0);
 }
 
 #[test]
 fn read_raw_field_truncated_32bit() {
     let mut c = Cursor::new(&[0x01, 0x02]);
-    assert!(c.read_raw_field(WIRE_32BIT).is_err());
+    assert_eq!(
+        c.read_raw_field(WIRE_32BIT),
+        Err(WireError::TruncatedFixed32)
+    );
+    assert_eq!(c.position(), 0);
 }
 
 #[test]
@@ -698,7 +859,8 @@ fn read_raw_field_truncated_len_payload() {
     // Length says 5 bytes but only 2 follow
     let data = [0x05, 0xAA, 0xBB];
     let mut c = Cursor::new(&data);
-    assert!(c.read_raw_field(WIRE_LEN).is_err());
+    assert_eq!(c.read_raw_field(WIRE_LEN), Err(WireError::LengthPastEnd));
+    assert_eq!(c.position(), 1);
 }
 
 /// A length prefix far past the end of the input, followed by `payload`.
@@ -719,7 +881,11 @@ fn read_len_delimited_huge_len_is_err() {
     for len in HUGE_LENS {
         let (data, prefix_len) = huge_len_input(len, &[0xAA, 0xBB, 0xCC]);
         let mut c = Cursor::new(&data);
-        assert!(c.read_len_delimited().is_err(), "len {len}");
+        assert_eq!(
+            c.read_len_delimited(),
+            Err(WireError::LengthPastEnd),
+            "len {len}"
+        );
         // The prefix is consumed, the payload is not.
         assert_eq!(c.position(), prefix_len, "len {len}");
         assert_eq!(c.remaining(), 3, "len {len}");
@@ -731,7 +897,11 @@ fn skip_field_len_huge_len_is_err() {
     for len in HUGE_LENS {
         let (data, prefix_len) = huge_len_input(len, &[0xAA, 0xBB, 0xCC]);
         let mut c = Cursor::new(&data);
-        assert!(c.skip_field(WIRE_LEN).is_err(), "len {len}");
+        assert_eq!(
+            c.skip_field(WIRE_LEN),
+            Err(WireError::LengthPastEnd),
+            "len {len}"
+        );
         assert_eq!(c.position(), prefix_len, "len {len}");
     }
 }
@@ -741,7 +911,11 @@ fn read_raw_field_len_huge_len_is_err() {
     for len in HUGE_LENS {
         let (data, prefix_len) = huge_len_input(len, &[0xAA, 0xBB, 0xCC]);
         let mut c = Cursor::new(&data);
-        assert!(c.read_raw_field(WIRE_LEN).is_err(), "len {len}");
+        assert_eq!(
+            c.read_raw_field(WIRE_LEN),
+            Err(WireError::LengthPastEnd),
+            "len {len}"
+        );
         assert_eq!(c.position(), prefix_len, "len {len}");
     }
 }
@@ -757,7 +931,7 @@ fn read_len_delimited_huge_len_mid_buffer() {
     assert_eq!(c.read_tag().unwrap(), Some((1, WIRE_LEN)));
     assert_eq!(c.read_len_delimited().unwrap(), b"ok");
     assert_eq!(c.position(), first);
-    assert!(c.read_len_delimited().is_err());
+    assert_eq!(c.read_len_delimited(), Err(WireError::LengthPastEnd));
     assert_eq!(c.position(), data.len());
 }
 
@@ -777,7 +951,7 @@ fn read_len_delimited_exact_fit_and_empty_at_eof() {
     // Length one past the end fails without consuming the payload.
     let data = [0x03, 0xAA, 0xBB];
     let mut c = Cursor::new(&data);
-    assert!(c.read_len_delimited().is_err());
+    assert_eq!(c.read_len_delimited(), Err(WireError::LengthPastEnd));
     assert_eq!(c.position(), 1);
 }
 
@@ -788,17 +962,24 @@ fn fixed_width_short_at_offset_leaves_cursor() {
     for width in [4usize, 8] {
         let mut c = Cursor::new(&data);
         c.read_varint().unwrap();
-        let err = if width == 4 {
-            c.read_fixed32().is_err()
+        let (err, wire) = if width == 4 {
+            (WireError::TruncatedFixed32, WIRE_32BIT)
         } else {
-            c.read_fixed64().is_err()
+            (WireError::TruncatedFixed64, WIRE_64BIT)
         };
-        assert!(err, "fixed{}", width * 8);
+        if width == 4 {
+            assert_eq!(c.read_fixed32(), Err(err));
+            assert_eq!(c.position(), 1);
+            assert_eq!(c.read_float(), Err(err));
+        } else {
+            assert_eq!(c.read_fixed64(), Err(err));
+            assert_eq!(c.position(), 1);
+            assert_eq!(c.read_double(), Err(err));
+        }
         assert_eq!(c.position(), 1);
-        let wire = if width == 4 { WIRE_32BIT } else { WIRE_64BIT };
-        assert!(c.skip_field(wire).is_err());
+        assert_eq!(c.skip_field(wire), Err(err));
         assert_eq!(c.position(), 1);
-        assert!(c.read_raw_field(wire).is_err());
+        assert_eq!(c.read_raw_field(wire), Err(err));
         assert_eq!(c.position(), 1);
     }
     // Exact fit at an offset succeeds and reaches the end.
@@ -813,13 +994,21 @@ fn fixed_width_short_at_offset_leaves_cursor() {
 fn read_raw_field_truncated_len_prefix() {
     // Continuation byte in length varint with no terminator
     let mut c = Cursor::new(&[0x80]);
-    assert!(c.read_raw_field(WIRE_LEN).is_err());
+    assert_eq!(c.read_raw_field(WIRE_LEN), Err(WireError::TruncatedVarint));
+    assert!(c.is_empty());
 }
 
 #[test]
 fn read_raw_field_unknown_wire_type() {
-    let mut c = Cursor::new(&[]);
-    assert!(c.read_raw_field(3).is_err());
+    for wire in UNKNOWN_WIRE_TYPES {
+        let mut c = Cursor::new(&VALID_FOR_ANY_WIRE_TYPE);
+        assert_eq!(
+            c.read_raw_field(wire),
+            Err(WireError::UnknownWireType),
+            "wire={wire}"
+        );
+        assert_eq!(c.position(), 0, "wire={wire}");
+    }
 }
 
 #[test]
@@ -1436,13 +1625,15 @@ fn read_fixed64() {
 #[test]
 fn read_fixed32_truncated() {
     let mut c = Cursor::new(&[0x01, 0x02]);
-    assert!(c.read_fixed32().is_err());
+    assert_eq!(c.read_fixed32(), Err(WireError::TruncatedFixed32));
+    assert_eq!(c.position(), 0);
 }
 
 #[test]
 fn read_fixed64_truncated() {
     let mut c = Cursor::new(&[0x01, 0x02, 0x03, 0x04]);
-    assert!(c.read_fixed64().is_err());
+    assert_eq!(c.read_fixed64(), Err(WireError::TruncatedFixed64));
+    assert_eq!(c.position(), 0);
 }
 
 #[test]

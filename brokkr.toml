@@ -6,6 +6,13 @@ ban = ["U+FFFD"]
 # "No external dependencies" (README, AGENTS.md, crate doc): an empty allow
 # list fails closed for every kind - normal, build and dev - so the claim holds
 # for contributors as well as consumers. Bench dependencies belong in bench/.
+[[textlint]]
+name = "assert-error-kind"
+pattern = '\.is_err\(\)'
+paths = ["tests/**/*.rs"]
+region = "code"
+message = "assert the WireError kind (assert_eq!(read, Err(WireError::...))), not just is_err(): a test that accepts any error passes for the wrong reason"
+
 [[dependency_rule]]
 name = "no-external-dependencies"
 from = "protohoggr"

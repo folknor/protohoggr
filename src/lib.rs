@@ -11,27 +11,118 @@ use std::iter::FusedIterator;
 // Error type
 // ---------------------------------------------------------------------------
 
-/// An error that occurs when decoding protobuf wire format.
-#[derive(Debug)]
-pub struct WireError {
-    /// Static error message describing the failure.
-    pub msg: &'static str,
+/// Declares [`WireError`] together with [`WireError::ALL`] and
+/// [`WireError::as_str`] from one list, so a new kind cannot be left out of
+/// `ALL` - the list the tests walk to produce every kind from real input.
+macro_rules! wire_errors {
+    ($($(#[$doc:meta])* $kind:ident => $msg:literal,)+) => {
+        /// An error that occurs when decoding protobuf wire format.
+        ///
+        /// A fieldless kind: `Copy` and comparable, so a failed read can be
+        /// asserted by kind. The kind says why the read failed,
+        /// not where it left the [`Cursor`]; each variant documents that end
+        /// state relative to the position the failing call started from.
+        //
+        // `repr(u32)` is for codegen; the discriminant values are incidental.
+        // Measured on a late-2026 nightly on x86-64 against the 16-byte
+        // `&'static str` error this enum replaced. With the default one-byte
+        // layout, the bit packing of the 8-byte `Result<u32, WireError>`
+        // (shifts and a tag test) stayed on the inlined one-byte `read_tag`
+        // path, and tag-dispatch loops over fixed32 and length-delimited
+        // fields ran up to a fifth slower. At four bytes, `Result<u32, _>` and
+        // `Result<Option<(u32, u32)>, _>` lay out as whole 32-bit words and
+        // the packing folds away; tag-dispatch loops retired fewer
+        // instructions than before. `repr(u64)` added instructions to them
+        // instead. One cost remains: the out-of-line `read_varint_slow`
+        // writes a 4-byte `Ok` tag with a zeroing idiom where the old error
+        // stored an 8-byte immediate, one more retired instruction per
+        // multi-byte varint, which did not show as more cycles under fat
+        // LTO. Remeasure before changing the representation.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[repr(u32)]
+        pub enum WireError {
+            $($(#[$doc])* $kind,)+
+        }
+
+        impl WireError {
+            /// Every kind, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$kind,)+];
+
+            /// A short static description of the kind, without the
+            /// `"wire format error: "` prefix that `Display` adds.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$kind => $msg,)+
+                }
+            }
+        }
+    };
+}
+
+wire_errors! {
+    /// The input ended inside a varint, or where a varint was required
+    /// (including an empty input). Nothing is left to read: the cursor is at
+    /// the end of its data.
+    ///
+    /// `read_tag` reports a clean end of input as `Ok(None)` instead.
+    TruncatedVarint => "truncated varint",
+    /// A varint's tenth byte is above `0x01`, terminal or continuation: no
+    /// `u64` varint can complete from it. The rest of the input is abandoned
+    /// and the cursor is at the end of its data.
+    ///
+    /// Only reads that decode the value report this. `skip_varint`, and
+    /// `skip_field` / `read_raw_field` for [`WIRE_VARINT`], scan for the
+    /// terminal byte without decoding and accept such a varint.
+    VarintOverflow => "varint overflows u64",
+    /// A well-formed varint holds a value above `u32::MAX` where a `u32` is
+    /// required (`read_varint_u32`, and a tag in `read_tag`). The varint is
+    /// consumed, nothing after it.
+    U32Overflow => "varint overflows u32",
+    /// A tag has field number 0, which protobuf forbids. The tag varint is
+    /// consumed, nothing after it.
+    FieldNumberZero => "tag has field number 0",
+    /// A length prefix is larger than the remaining input (or than `usize`).
+    /// The prefix is consumed; the payload is not.
+    LengthPastEnd => "length-delimited field extends past end",
+    /// Fewer than 4 bytes remain for a fixed32, float or [`WIRE_32BIT`]
+    /// field. The cursor has not moved.
+    TruncatedFixed32 => "truncated 32-bit fixed-width value",
+    /// Fewer than 8 bytes remain for a fixed64, double or [`WIRE_64BIT`]
+    /// field. The cursor has not moved.
+    TruncatedFixed64 => "truncated 64-bit fixed-width value",
+    /// `skip_field` or `read_raw_field` was given a wire type other than
+    /// [`WIRE_VARINT`], [`WIRE_64BIT`], [`WIRE_LEN`] or [`WIRE_32BIT`]. That
+    /// includes the group types 3 and 4, which this crate does not support.
+    /// The cursor has not moved.
+    UnknownWireType => "unknown wire type",
 }
 
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "wire format error: {}", self.msg)
+        write!(f, "wire format error: {}", self.as_str())
     }
 }
 
+/// A leaf error: `source()` is `None`.
 impl std::error::Error for WireError {}
+
+// `WireError` is meant to travel anywhere an error can: boxed as
+// `dyn Error + Send + Sync`, copied, and kept past the input it came from.
+const _: () = {
+    const fn assert_error<T: std::error::Error + Send + Sync + Copy + 'static>() {}
+    assert_error::<WireError>();
+};
 
 /// A type alias for `Result<T, WireError>`.
 pub type WireResult<T> = Result<T, WireError>;
 
+/// Every decoding error is built here. `#[cold]` asks the
+/// optimizer to treat the branches that call it as unlikely and lay the
+/// error paths out away from the hot code; it is a hint, not a guarantee.
 #[cold]
-fn wire_error(msg: &'static str) -> WireError {
-    WireError { msg }
+fn wire_error(kind: WireError) -> WireError {
+    kind
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +245,7 @@ impl<'a> Cursor<'a> {
     #[inline]
     pub fn read_varint(&mut self) -> WireResult<u64> {
         if self.pos >= self.data.len() {
-            return Err(wire_error("unexpected end of input reading varint"));
+            return Err(wire_error(WireError::TruncatedVarint));
         }
         let b = self.data[self.pos];
         self.pos += 1;
@@ -169,7 +260,7 @@ impl<'a> Cursor<'a> {
         let mut shift: u32 = 7;
         loop {
             if self.pos >= self.data.len() {
-                return Err(wire_error("truncated varint"));
+                return Err(wire_error(WireError::TruncatedVarint));
             }
             let b = self.data[self.pos];
             self.pos += 1;
@@ -181,7 +272,7 @@ impl<'a> Cursor<'a> {
                     // (the packed iterators) then stop for good instead of
                     // resuming mid-garbage at the next byte.
                     self.pos = self.data.len();
-                    return Err(wire_error("varint overflows u64"));
+                    return Err(wire_error(WireError::VarintOverflow));
                 }
                 val |= u64::from(b) << 63;
                 return Ok(val);
@@ -253,7 +344,7 @@ impl<'a> Cursor<'a> {
     pub fn read_varint_u32(&mut self) -> WireResult<u32> {
         let v = self.read_varint()?;
         if v > u64::from(u32::MAX) {
-            return Err(wire_error("varint overflows u32"));
+            return Err(wire_error(WireError::U32Overflow));
         }
         #[expect(clippy::cast_possible_truncation)]
         Ok(v as u32)
@@ -290,7 +381,7 @@ impl<'a> Cursor<'a> {
     pub fn read_fixed32(&mut self) -> WireResult<u32> {
         match self.take_array() {
             Some(bytes) => Ok(u32::from_le_bytes(*bytes)),
-            None => Err(wire_error("unexpected end of input reading fixed32")),
+            None => Err(wire_error(WireError::TruncatedFixed32)),
         }
     }
 
@@ -299,7 +390,7 @@ impl<'a> Cursor<'a> {
     pub fn read_fixed64(&mut self) -> WireResult<u64> {
         match self.take_array() {
             Some(bytes) => Ok(u64::from_le_bytes(*bytes)),
-            None => Err(wire_error("unexpected end of input reading fixed64")),
+            None => Err(wire_error(WireError::TruncatedFixed64)),
         }
     }
 
@@ -333,7 +424,7 @@ impl<'a> Cursor<'a> {
         let v = self.read_varint_u32()?;
         let field = v >> 3;
         if field == 0 {
-            return Err(wire_error("tag has field number 0"));
+            return Err(wire_error(WireError::FieldNumberZero));
         }
         Ok(Some((field, v & 0x7)))
     }
@@ -354,7 +445,7 @@ impl<'a> Cursor<'a> {
         usize::try_from(len)
             .ok()
             .and_then(|len| self.take(len))
-            .ok_or_else(|| wire_error("length-delimited field extends past end"))
+            .ok_or_else(|| wire_error(WireError::LengthPastEnd))
     }
 
     /// Skip a varint by scanning for the terminating byte (MSB=0)
@@ -368,7 +459,7 @@ impl<'a> Cursor<'a> {
     pub fn skip_varint(&mut self) -> WireResult<()> {
         loop {
             if self.pos >= self.data.len() {
-                return Err(wire_error("unexpected end of input skipping varint"));
+                return Err(wire_error(WireError::TruncatedVarint));
             }
             let b = self.data[self.pos];
             self.pos += 1;
@@ -401,7 +492,7 @@ impl<'a> Cursor<'a> {
             }
             WIRE_64BIT => {
                 if self.take_array::<8>().is_none() {
-                    return Err(wire_error("unexpected end of input skipping 64-bit"));
+                    return Err(wire_error(WireError::TruncatedFixed64));
                 }
             }
             WIRE_LEN => {
@@ -409,10 +500,10 @@ impl<'a> Cursor<'a> {
             }
             WIRE_32BIT => {
                 if self.take_array::<4>().is_none() {
-                    return Err(wire_error("unexpected end of input skipping 32-bit"));
+                    return Err(wire_error(WireError::TruncatedFixed32));
                 }
             }
-            _ => return Err(wire_error("unknown wire type")),
+            _ => return Err(wire_error(WireError::UnknownWireType)),
         }
         Ok(())
     }
@@ -1049,8 +1140,15 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
                 break;
             }
             shift += 7;
+            // Unreachable: the `shift == 63` arm above leaves the loop on
+            // every path, so `shift` never passes 63 and every over-long
+            // varint stops there as an overflow. The branch stays for
+            // codegen, not for safety: on a late-2026 nightly on x86-64,
+            // deleting it added an instruction per element to the
+            // single-byte fast path above, and moving the 10th-byte arm after
+            // `shift += 7` instead ran slower on 9- and 10-byte varints.
+            // Remeasure before touching it.
             if shift > 63 {
-                // Overlong varint - stop silently.
                 return;
             }
         }

@@ -82,66 +82,6 @@ inside loop conditionals.
 
 Reported by: codex/tests, opus/tests, opus/machinery.
 
-## VER-003 - Negative tests assert only `is_err()`, and `WireError` has no kind to assert
-
-`WireError` is `{ msg: &'static str }` with no kind, `PartialEq` or `Clone`,
-so tests cannot say which failure they expect and none does. Cases where the
-test cannot fail for the reason it names:
-
-- `skip_field_unknown_wire_type` and `read_raw_field_unknown_wire_type` run on
-  an empty cursor. If wire type 3 were accepted and routed to a skip path, the
-  call would still fail on end-of-input. Wire type 7 and values above 7 are
-  not tried.
-- `decode_varint_11byte_rejected` and `decode_varint_10byte_overflow_high`
-  pass on the 10th-byte overflow error (see VER-004).
-- `read_fixed32_truncated`, `read_fixed*_truncated`, `read_raw_field_truncated_*`
-  pass for any error.
-- `WireError::msg` is a public field, so anyone can construct arbitrary errors
-  (opus/tests).
-
-Proposed: make `WireError` an enum of kinds (`Copy`, `PartialEq`, message via
-`Display`) and assert kinds; give the unknown-wire-type tests input valid for
-any accepted type (for example 16 zero bytes) so truncation cannot be the
-reason. Enforceable by type plus tests; opus/tests notes `dead_code` does not
-fire on pub enum variants, so a test constructing every variant from input
-holds dead kinds; opus/machinery proposes a textlint rule banning bare
-`.is_err())` in `tests/`.
-
-Reported by: opus/tests, opus/machinery.
-
-## VER-004 - The "varint too long" error branch is dead, and a test is named for it
-
-In `read_varint_slow` and in `decode_packed_sint64_cumulative`, `shift` steps
-7, 14, ..., 63 and returns or breaks on both branches at 63, so
-`if shift > 63 { ... "varint too long" ... }` (and the cumulative
-"Overlong varint - stop silently") never executes. Every over-long varint is
-reported as "varint overflows u64". `decode_varint_11byte_rejected` says "too
-long regardless of final byte" but is rejected by the 10th-byte overflow check,
-duplicating `decode_varint_10byte_overflow`. No coverage run is part of the
-check, so nothing notices.
-
-Proposed: delete both branches, or restructure so one branch owns over-long
-and one owns overflow; rename or drop the test. Enforceable by the error enum
-plus a per-kind test (VER-003), or a periodic coverage lane
-(`cargo llvm-cov`).
-
-Reported by: opus/tests, opus/machinery.
-
-## VER-005 - `wire_error_is_error` and `wire_error_display` assert less than they claim
-
-`wire_error_is_error` is `let _: &dyn std::error::Error = &err;`, a
-compile-time fact presented as a runtime test that cannot fail once it
-compiles. Its comment says `source()` returns `None`, which is never asserted.
-`wire_error_display` asserts only the `"wire format error:"` prefix
-(opus/tests).
-
-Proposed: assert `err.source().is_none()` if that is an intended contract, or
-turn the trait check into a `const` static assertion (in `lib.rs`, per
-opus/machinery) so it does not count as a test. codex/tests: the trait check
-is meaningful and should remain.
-
-Reported by: codex/tests, opus/tests, opus/machinery.
-
 ## VER-006 - Tests whose names or comments claim something they do not do
 
 - `zigzag_decode_roundtrip` checks known values and never roundtrips.
@@ -170,7 +110,8 @@ is cross-checked, and `cumulative_stops_matches_packed_iter_on_overflow`
 compares each side to a literal rather than to each other. Untested divergence
 surfaces: a truncated multi-byte tail after valid values (the case the doc
 names; no cumulative test at all), mid-stream truncation followed by valid
-bytes, an over-long sequence (the dead branch in VER-004), data counted as zero
+bytes, an over-long sequence (reaching the cumulative decoder's unreachable
+`shift > 63` branch, kept on purpose for codegen), data counted as zero
 by `count_packed_varints` but non-empty, and non-fused iteration (the packed
 iterators resuming after `None`, filed in `notes/bugs.md`).
 
