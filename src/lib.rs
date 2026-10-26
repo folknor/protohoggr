@@ -933,8 +933,10 @@ pub fn count_packed_varints(data: &[u8]) -> usize {
     }
 }
 
-/// Scalar fallback: count bytes where `b < 0x80`.
-#[cfg(not(target_arch = "x86_64"))]
+/// Scalar fallback: count bytes where `b < 0x80`. The production path off
+/// x86-64; on x86-64 it is built for the unit tests, which hold the SSE2 path
+/// equal to it.
+#[cfg(any(test, not(target_arch = "x86_64")))]
 fn count_packed_varints_scalar(data: &[u8]) -> usize {
     let mut count = 0usize;
     for &b in data {
@@ -946,10 +948,16 @@ fn count_packed_varints_scalar(data: &[u8]) -> usize {
 }
 
 /// SSE2 implementation: process 16 bytes at a time using `PMOVMSKB`.
+///
+/// The `target_feature` attribute is load-bearing even though SSE2 is
+/// baseline on x86-64: without it, calling `_mm_movemask_epi8` is unsafe
+/// whatever the build configuration enables. The unaligned load takes a raw
+/// pointer and has no safe form, so the function stays `unsafe` either way.
+/// Safe portable alternatives (word-at-a-time SWAR, a movemask idiom LLVM
+/// does not lower to `PMOVMSKB`) were measured slower at some lengths.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_packed_varints_sse2(data: &[u8]) -> usize {
-    #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::{_mm_loadu_si128, _mm_movemask_epi8};
 
     let mut count = 0usize;
@@ -1431,5 +1439,118 @@ pub fn encode_packed_bool(buf: &mut Vec<u8>, field: u32, values: &[bool]) {
     encode_varint(buf, values.len() as u64);
     for &v in values {
         buf.push(u8::from(v));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests of private implementations
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{count_packed_varints, count_packed_varints_scalar};
+
+    /// Lengths swept at every offset: covers empty, every scalar tail length
+    /// on its own, and several 16-byte chunks followed by every tail length.
+    const MAX_LEN: usize = 80;
+    /// Offsets into the backing buffer, so the slices start at every
+    /// alignment within a 16-byte chunk.
+    const MAX_OFFSET: usize = 16;
+
+    fn reference(data: &[u8]) -> usize {
+        data.iter().filter(|&&b| b < 0x80).count()
+    }
+
+    /// Xorshift32 byte stream; deterministic and dependency-free.
+    fn random_bytes(len: usize, mut state: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            out.push(state.to_le_bytes()[0]);
+        }
+        out
+    }
+
+    /// Backing buffers of `MAX_OFFSET + MAX_LEN` bytes, one per pattern.
+    fn patterns() -> Vec<Vec<u8>> {
+        let n = MAX_OFFSET + MAX_LEN;
+        let mut out = vec![
+            vec![0x00; n],
+            vec![0xFF; n],
+            (0..n)
+                .map(|i| if i % 2 == 0 { 0x80 } else { 0x7F })
+                .collect(),
+            random_bytes(n, 0x1234_5678),
+            random_bytes(n, 0x9E37_79B9),
+        ];
+        // A lone terminal, and a lone continuation byte, at every position.
+        for i in 0..n {
+            let mut one_terminal = vec![0xFF; n];
+            one_terminal[i] = 0x7F;
+            out.push(one_terminal);
+            let mut one_continuation = vec![0x00; n];
+            one_continuation[i] = 0x80;
+            out.push(one_continuation);
+        }
+        out
+    }
+
+    /// Long bodies: every lane of the vector loop saturated, and random.
+    fn long_bodies() -> Vec<Vec<u8>> {
+        vec![
+            vec![0x00; 4099],
+            vec![0xFF; 4099],
+            random_bytes(4099, 0xDEAD_BEEF),
+        ]
+    }
+
+    /// Run `check` on every length and offset of every pattern, then on the
+    /// long bodies.
+    fn sweep(check: impl Fn(&[u8])) {
+        for buf in patterns() {
+            for offset in 0..MAX_OFFSET {
+                for len in 0..=MAX_LEN {
+                    check(&buf[offset..offset + len]);
+                }
+            }
+        }
+        for body in long_bodies() {
+            check(&body);
+            check(&body[1..]);
+        }
+    }
+
+    #[test]
+    fn count_varints_scalar_matches_reference() {
+        sweep(|data| {
+            assert_eq!(
+                count_packed_varints_scalar(data),
+                reference(data),
+                "{data:02x?}"
+            );
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn count_varints_sse2_matches_scalar() {
+        sweep(|data| {
+            // SAFETY: SSE2 is baseline on x86-64 - always available.
+            let sse2 = unsafe { super::count_packed_varints_sse2(data) };
+            assert_eq!(sse2, count_packed_varints_scalar(data), "{data:02x?}");
+        });
+    }
+
+    #[test]
+    fn count_varints_public_matches_scalar() {
+        sweep(|data| {
+            assert_eq!(
+                count_packed_varints(data),
+                count_packed_varints_scalar(data),
+                "{data:02x?}"
+            );
+        });
     }
 }

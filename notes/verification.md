@@ -152,8 +152,8 @@ Reported by: codex/tests, opus/tests, opus/machinery.
   `Cursor` has no int32 reader though it has `read_varint_i64`; the caller-side
   `as i32` path is untested (opus/tests calls this a small API gap).
 - `count_varints_17_bytes` / `count_varints_32_bytes` say they exercise the
-  SIMD chunk "on x86-64"; elsewhere the same names run the scalar fallback
-  (see VER-014).
+  SIMD chunk "on x86-64"; elsewhere the same names run the scalar fallback.
+  The unit tests in `src/lib.rs` now name each backend they check.
 - `cumulative_stops_on_overflow_varint` comment says "A valid varint [0x01]"
   but the data is `[0x02]` (opus/machinery).
 - `cumulative_stops_matches_packed_iter_on_overflow`: see VER-007.
@@ -314,7 +314,8 @@ opus/brokkr-config: Miri on the host and on foreign targets covers UB, 32-bit
 narrows with `try_from` rather than truncating; on 64-bit they cannot tell),
 big-endian byte order (every fixed-width
 path uses `to_le_bytes`/`from_le_bytes`; nothing tests a big-endian target)
-and the scalar fallback (VER-014) at once, with no linker. Proposed
+and the scalar fallback as a real production path (VER-014) at once, with no
+linker. Proposed
 `brokkr.toml` entries:
 
 ```toml
@@ -359,27 +360,38 @@ The Miri lane.
 Reported by: opus/tests, opus/machinery, opus/bench, opus/brokkr-config;
 codex/tests and codex/machinery also propose a Miri lane.
 
-## VER-014 - The non-x86_64 `count_packed_varints` path is never compiled, linted or tested
+## VER-014 - No lane builds a non-x86_64 target
 
-`count_packed_varints_scalar` is `#[cfg(not(target_arch = "x86_64"))]`. On the
-only host that runs the check it is never compiled, never seen by clippy and
-never run; on other architectures the SSE2 path is absent. Nothing
-cross-checks the SSE2 result against a reference, and the existing SIMD-length
-tests (17 and 32 bytes) do not cover a mixed continuation-byte tail after a
-vector chunk or offset subslices (codex/tests). README advertises a "scalar
-fallback elsewhere" that has never been built (opus/brokkr-config). Integration
-tests reach only the public API, so they cannot select an implementation. This
-is the "production value with no injection point" shape. The library itself
-lints clean for `aarch64-unknown-linux-musl` (checked by hand, not a lane); the
-bench package does not build there without a cross C compiler, which
-criterion's `alloca` needs.
+Both `count_packed_varints` implementations are now compiled, linted
+(`clippy --all-targets`) and tested on x86-64: the scalar fallback is
+`#[cfg(any(test, not(target_arch = "x86_64")))]`, and the unit tests in
+`src/lib.rs` (`count_varints_scalar_matches_reference`,
+`count_varints_sse2_matches_scalar`, `count_varints_public_matches_scalar`)
+sweep every length 0..=80 at every offset 0..16 over saturated, alternating,
+random and single-terminal / single-continuation patterns plus 4 KiB bodies.
+What remains is the non-x86-64 build configuration itself: the dispatcher's
+`not(target_arch = "x86_64")` branch and any target-dependent lint are never
+compiled by a lane. The scalar body has no target-dependent types, intrinsics
+or casts, so this is a hygiene gap, not a known hidden flaw. The library lints
+clean for `aarch64-unknown-linux-musl` (checked by hand, not a lane); the bench
+package does not build there without a cross C compiler, which criterion's
+`alloca` needs.
 
-Proposed: compile the scalar version unconditionally as a private function,
-keep the dispatcher, and add a differential unit test asserting
-`sse2 == scalar` over lengths 0..=64, every alignment and varied byte patterns
-(or a `#[doc(hidden)]` test surface). Optional cross-target lint lane. Proposed
-by opus/brokkr-config (the nightly toolchain has the aarch64-musl std; no
-linker needed for clippy):
+A possible way to delete the arch split altogether was measured and rejected
+under the "no performance cost on well-formed data" constraint. Safe
+word-at-a-time SWAR (terminal flags `!w & 0x8080...80`, reduced by
+`count_ones` when `popcnt` is enabled or by a multiply-by-`0x0101...01`
+horizontal sum otherwise, with overlapping final loads instead of a byte
+tail) beat the SSE2 path by 2.5-3.6x on bodies of 1000+ bytes and by 20-60%
+on mixed lengths 0..=48 and 0..=400, on both `-Ctarget-cpu=native` (Zen 5) and
+generic x86-64. But it lost at some fixed lengths: natively at 24-64 bytes
+(for example 32 bytes, 1.62 vs 1.99 ns, +23%; 48 bytes, 1.81 vs 2.17 ns,
++20%), and on generic x86-64 at 16 bytes (1.30 vs 1.61 ns). A safe movemask
+idiom is not lowered to `PMOVMSKB` and ran 2-5x slower. Taking that trade
+needs the user to relax the constraint.
+
+Proposed: optional cross-target lint lane, by opus/brokkr-config (the nightly
+toolchain has the aarch64-musl std; no linker needed for clippy):
 
 ```toml
 [[script_check]]
@@ -393,9 +405,8 @@ diagnostics = "rustc"
 opus/brokkr-config notes a brokkr gap: there is no clippy-only sweep shape, and
 a `[[check]] target` for a non-native triple always runs the test phase, which
 cannot execute here (`aarch64-unknown-linux-musl` cannot run;
-`i686-unknown-linux-gnu` lacks 32-bit link files on this host). codex/tests:
-report which backend actually ran. Enforceable structurally (both always
-compile) plus the differential test; the cross lane.
+`i686-unknown-linux-gnu` lacks 32-bit link files on this host). Enforceable by
+the cross lane.
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery,
 opus/bench, opus/brokkr-config.
@@ -828,22 +839,6 @@ check (codex/tests).
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/brokkr-config.
 
-## VER-034 - `count_packed_varints_sse2` carries `unsafe`, `target_feature` and a cfg it does not need
-
-SSE2 is baseline on x86_64, so `#[target_feature(enable = "sse2")]` adds
-nothing; on Rust 1.87+ `_mm_movemask_epi8` is safe in that context, leaving one
-raw-pointer load whose safety follows from `chunks_exact(16)`. The function
-could be safe, removing the `unsafe` call site in `count_packed_varints`; the
-declared MSRV (1.87) no longer stands in the way (opus/tests, opus/machinery).
-The `use
-core::arch::x86_64::...` inside repeats the function's own
-`#[cfg(target_arch = "x86_64")]` (opus/tests, opus/bench, opus/brokkr-config;
-cosmetic). codex/machinery confirms the SSE2 safety justification and load
-bounds hold for the selected branch.
-
-Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
-opus/brokkr-config.
-
 ## VER-035 - Packed iterator types derive `Clone` but not `Debug`
 
 `Cursor` derives both. `missing_debug_implementations` would hold it.
@@ -944,13 +939,12 @@ opus/brokkr-config also lists, as free: `[manifest] sort_dependencies = true`.
 
 Reported by: opus/tests, opus/brokkr-config.
 
-## VER-042 - The lib unit-test harness is empty but built and run every check
+## VER-042 - The lib unit-test harness holds only the `count_packed_varints` tests
 
-The lib unit harness has 0 tests (no `#[cfg(test)]` in `src/`) and is built,
-linked and spawned every run. Proposed: use it rather than disable it - the
-differential tests in VER-007 and VER-014 and tests of private items
-(`sint32_wire_bits`, `read_varint_slow`'s branches) need a `#[cfg(test)]`
-module (opus/tests, opus/machinery); otherwise `[lib] test = false`.
+The `#[cfg(test)] mod tests` in `src/lib.rs` now exists and holds the
+`count_packed_varints` backend tests. Still missing from it: the differential
+test in VER-007 and tests of private items (`sint32_wire_bits`,
+`read_varint_slow`'s branches) (opus/tests, opus/machinery).
 
 The brokkr-side parts of this finding (three cargo invocations per check, a
 dead-harness warning) are tracked in brokkr's bz tracker. Readings differ on
