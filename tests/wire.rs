@@ -229,7 +229,7 @@ fn decode_read_tag_field_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn zigzag_decode_roundtrip() {
+fn zigzag_decode_known_values() {
     assert_eq!(zigzag_decode_64(0), 0);
     assert_eq!(zigzag_decode_64(1), -1);
     assert_eq!(zigzag_decode_64(2), 1);
@@ -1144,6 +1144,44 @@ fn zigzag_encode_decode_roundtrip() {
     }
 }
 
+#[test]
+fn zigzag_32_bijection_sweep() {
+    // Strided sweep over the whole u32 domain plus both ends and every
+    // sign-bit neighbourhood: decode then encode is the identity on u32, and
+    // encode then decode is the identity on i32.
+    let mut u = 0u32;
+    loop {
+        assert_eq!(zigzag_encode_32(zigzag_decode_32(u)), u, "u32 {u}");
+        let (next, overflow) = u.overflowing_add(4099);
+        if overflow {
+            break;
+        }
+        u = next;
+    }
+    for u in [
+        u32::MAX - 1,
+        u32::MAX,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0x8000_0001,
+    ] {
+        assert_eq!(zigzag_encode_32(zigzag_decode_32(u)), u, "u32 {u}");
+    }
+    for v in [
+        i32::MIN,
+        i32::MIN + 1,
+        -1,
+        0,
+        1,
+        i32::MAX - 1,
+        i32::MAX,
+        1 << 30,
+        -(1 << 30),
+    ] {
+        assert_eq!(zigzag_decode_32(zigzag_encode_32(v)), v, "i32 {v}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encode: tag
 // ---------------------------------------------------------------------------
@@ -1223,15 +1261,28 @@ fn varint_field_nonzero() {
 }
 
 #[test]
-fn int32_field_positive_roundtrip() {
+fn int32_field_decodes_through_i64_then_narrows() {
+    // Cursor has no int32 reader: the caller reads the varint as i64 and
+    // narrows, which must give the original value for positive and negative.
+    for (bytes, expected) in [
+        (&[0x08, 0x2A][..], 42i32),
+        (
+            &[
+                0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
+            ][..],
+            -1,
+        ),
+    ] {
+        let mut c = Cursor::new(bytes);
+        let (field, wt) = c.read_tag().unwrap().unwrap();
+        assert_eq!((field, wt), (1, WIRE_VARINT));
+        let wide = c.read_varint_i64().unwrap();
+        assert_eq!(i32::try_from(wide).unwrap(), expected);
+        assert!(c.is_empty());
+    }
     let mut buf = Vec::new();
     encode_int32_field(&mut buf, 1, 42);
-    let mut c = Cursor::new(&buf);
-    let (field, wt) = c.read_tag().unwrap().unwrap();
-    assert_eq!((field, wt), (1, WIRE_VARINT));
-    // int32 on the wire is just a varint
-    let decoded = c.read_varint().unwrap();
-    assert_eq!(decoded, 42);
+    assert_eq!(buf, [0x08, 0x2A]);
 }
 
 #[test]
@@ -1245,23 +1296,29 @@ fn int64_field_skip_zero() {
 fn int64_field_positive() {
     let mut buf = Vec::new();
     encode_int64_field(&mut buf, 1, 5001);
-    assert_eq!(buf[0], 0x08);
-    let rest = &buf[1..];
-    let mut val: u64 = 0;
-    for (i, &b) in rest.iter().enumerate() {
-        val |= u64::from(b & 0x7f) << (7 * i);
-        if b < 0x80 {
-            assert_eq!(val, 5001);
-            break;
-        }
-    }
+    // 5001 = 39 * 128 + 9
+    assert_eq!(buf, [0x08, 0x89, 0x27]);
 }
 
 #[test]
 fn int32_field_negative_sign_extends() {
     let mut buf = Vec::new();
     encode_int32_field(&mut buf, 1, -1);
-    assert_eq!(buf.len(), 11);
+    assert_eq!(
+        buf,
+        [
+            0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01
+        ]
+    );
+    // i32::MIN sign-extends to 0xFFFF_FFFF_8000_0000.
+    let mut buf = Vec::new();
+    encode_int32_field(&mut buf, 1, i32::MIN);
+    assert_eq!(
+        buf,
+        [
+            0x08, 0x80, 0x80, 0x80, 0x80, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0x01
+        ]
+    );
 }
 
 #[test]
@@ -1394,9 +1451,12 @@ fn packed_int32_negative() {
     let mut buf = Vec::new();
     let mut scratch = Vec::new();
     encode_packed_int32(&mut buf, &mut scratch, 8, &[-1]);
-    assert_eq!(buf[0], 0x42);
-    assert_eq!(buf[1], 0x0a);
-    assert_eq!(buf.len(), 12);
+    assert_eq!(
+        buf,
+        [
+            0x42, 0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01
+        ]
+    );
 }
 
 #[test]
@@ -1637,23 +1697,21 @@ fn read_fixed64_truncated() {
 }
 
 #[test]
-#[expect(clippy::approx_constant)]
 fn read_float() {
-    let val: f32 = 3.14;
-    let data = val.to_le_bytes();
+    // IEEE 754 binary32 0x4048F5C3 (3.14), little-endian, then a sentinel.
+    let data = [0xC3, 0xF5, 0x48, 0x40, 0xAA];
     let mut c = Cursor::new(&data);
-    let decoded = c.read_float().unwrap();
-    assert!((decoded - val).abs() < f32::EPSILON);
+    assert_eq!(c.read_float().unwrap().to_bits(), 0x4048_F5C3);
+    assert_eq!(c.position(), 4);
 }
 
 #[test]
-#[expect(clippy::approx_constant)]
 fn read_double() {
-    let val: f64 = 2.718281828;
-    let data = val.to_le_bytes();
+    // IEEE 754 binary64 0xC000_0000_0000_0000 (-2.0), little-endian.
+    let data = [0, 0, 0, 0, 0, 0, 0, 0xC0, 0xAA];
     let mut c = Cursor::new(&data);
-    let decoded = c.read_double().unwrap();
-    assert!((decoded - val).abs() < f64::EPSILON);
+    assert_eq!(c.read_double().unwrap().to_bits(), 0xC000_0000_0000_0000);
+    assert_eq!(c.position(), 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -1893,6 +1951,37 @@ fn float_nan_roundtrip() {
 }
 
 #[test]
+fn float_nan_payload_and_sign_preserved() {
+    for bits in [0x7FC0_0001u32, 0xFFC0_1234, 0x7FFF_FFFF] {
+        let mut buf = Vec::new();
+        encode_float_field_always(&mut buf, 1, f32::from_bits(bits));
+        let le = bits.to_le_bytes();
+        assert_eq!(buf, [0x0D, le[0], le[1], le[2], le[3]]);
+        let mut c = Cursor::new(&buf);
+        let _ = c.read_tag().unwrap().unwrap();
+        assert_eq!(c.read_float().unwrap().to_bits(), bits);
+    }
+}
+
+#[test]
+fn double_nan_payload_and_sign_preserved() {
+    for bits in [
+        0x7FF8_0000_0000_0001u64,
+        0xFFF8_0000_0000_1234,
+        0x7FFF_FFFF_FFFF_FFFF,
+    ] {
+        let mut buf = Vec::new();
+        encode_double_field_always(&mut buf, 1, f64::from_bits(bits));
+        let le = bits.to_le_bytes();
+        assert_eq!(buf[0], 0x09);
+        assert_eq!(&buf[1..], &le);
+        let mut c = Cursor::new(&buf);
+        let _ = c.read_tag().unwrap().unwrap();
+        assert_eq!(c.read_double().unwrap().to_bits(), bits);
+    }
+}
+
+#[test]
 fn float_infinity_roundtrip() {
     for value in [f32::INFINITY, f32::NEG_INFINITY] {
         let mut buf = Vec::new();
@@ -1900,7 +1989,7 @@ fn float_infinity_roundtrip() {
         let mut c = Cursor::new(&buf);
         let _ = c.read_tag().unwrap().unwrap();
         let decoded = c.read_float().unwrap();
-        assert_eq!(decoded, value);
+        assert_eq!(decoded.to_bits(), value.to_bits());
     }
 }
 
@@ -1914,8 +2003,8 @@ fn float_negative_zero_not_skipped() {
     let mut c = Cursor::new(&buf);
     let _ = c.read_tag().unwrap().unwrap();
     let decoded = c.read_float().unwrap();
-    assert!(decoded.is_sign_negative());
-    assert_eq!(decoded, 0.0);
+    assert_eq!(decoded.to_bits(), 0x8000_0000);
+    assert_eq!(buf, [0x0D, 0x00, 0x00, 0x00, 0x80]);
 }
 
 #[test]
@@ -1936,7 +2025,7 @@ fn double_infinity_roundtrip() {
         let mut c = Cursor::new(&buf);
         let _ = c.read_tag().unwrap().unwrap();
         let decoded = c.read_double().unwrap();
-        assert_eq!(decoded, value);
+        assert_eq!(decoded.to_bits(), value.to_bits());
     }
 }
 
@@ -1948,8 +2037,8 @@ fn double_negative_zero_not_skipped() {
     let mut c = Cursor::new(&buf);
     let _ = c.read_tag().unwrap().unwrap();
     let decoded = c.read_double().unwrap();
-    assert!(decoded.is_sign_negative());
-    assert_eq!(decoded, 0.0);
+    assert_eq!(decoded.to_bits(), 0x8000_0000_0000_0000);
+    assert_eq!(buf, [0x09, 0, 0, 0, 0, 0, 0, 0, 0x80]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1999,15 +2088,17 @@ fn count_varints_truncated_tail() {
 
 #[test]
 fn count_varints_17_bytes() {
-    // Exercises SIMD 16-byte chunk + 1-byte scalar tail on x86-64.
-    // 17 single-byte varints.
+    // 17 single-byte varints: one 16-byte chunk plus a 1-byte tail where a
+    // chunked backend is in use, the scalar loop elsewhere. The backend unit
+    // tests in src/lib.rs name each one they check.
     let data: Vec<u8> = (0..17).collect();
     assert_eq!(count_packed_varints(&data), 17);
 }
 
 #[test]
 fn count_varints_32_bytes() {
-    // Two full SIMD iterations on x86-64.
+    // Two full 16-byte chunks where a chunked backend is in use, the scalar
+    // loop elsewhere.
     let data: Vec<u8> = (0..32).map(|i| i & 0x7F).collect();
     assert_eq!(count_packed_varints(&data), 32);
 }
@@ -2150,7 +2241,7 @@ fn cumulative_wrapping() {
 
 #[test]
 fn cumulative_stops_on_overflow_varint() {
-    // A valid varint [0x01] followed by a 10-byte varint whose final byte is
+    // A valid varint [0x02] followed by a 10-byte varint whose final byte is
     // 0x02 (overflows u64 - read_varint rejects this, PackedIter stops).
     // The batch decoder must also stop and not append the overflowing value.
     let mut data = vec![0x02]; // zigzag(2) = 1, so delta = 1
@@ -2378,4 +2469,474 @@ fn unchecked_malformed_but_terminated_stops_after_terminal() {
         assert_eq!(unsafe { c.read_varint_unchecked() }, u64::from(SENTINEL));
         assert!(c.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Literal wire-byte vectors for every encoder family. Expected bytes are
+// written by hand from the protobuf encoding rules (tag = field << 3 | wire
+// type, little-endian fixed-width, zigzag, base-128 varints), never produced
+// by this crate.
+// ---------------------------------------------------------------------------
+
+const TEN_FF_01: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+
+#[test]
+fn canonical_corpus_against_varint_encoders_and_readers() {
+    for &(value, bytes) in CANONICAL_VARINTS {
+        let mut buf = Vec::new();
+        encode_varint(&mut buf, value);
+        assert_eq!(buf, bytes, "encode_varint({value})");
+
+        let mut field = Vec::new();
+        encode_varint_field_always(&mut field, 1, value);
+        let mut expected = vec![0x08];
+        expected.extend_from_slice(bytes);
+        assert_eq!(field, expected, "field for {value}");
+
+        let data = with_sentinel(bytes);
+        let mut c = Cursor::new(&data);
+        assert_eq!(c.read_varint().unwrap(), value);
+        assert_eq!(c.position(), bytes.len());
+        assert_eq!(c.read_varint().unwrap(), u64::from(SENTINEL));
+
+        // Packed uint32 for the values that fit.
+        if let Ok(v32) = u32::try_from(value) {
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            encode_packed_uint32(&mut out, &mut scratch, 2, &[v32]);
+            let mut expected = vec![0x12];
+            expected.push(u8::try_from(bytes.len()).unwrap());
+            expected.extend_from_slice(bytes);
+            assert_eq!(out, expected, "packed uint32 {v32}");
+        }
+    }
+}
+
+#[test]
+fn int64_and_int32_negative_literals() {
+    let mut buf = Vec::new();
+    encode_int64_field_always(&mut buf, 1, -1);
+    let mut expected = vec![0x08];
+    expected.extend_from_slice(&TEN_FF_01);
+    assert_eq!(buf, expected);
+
+    let mut buf = Vec::new();
+    encode_int64_field_always(&mut buf, 1, i64::MIN);
+    assert_eq!(
+        buf,
+        [
+            0x08, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01
+        ]
+    );
+
+    let mut buf = Vec::new();
+    encode_int64_field(&mut buf, 1, i64::MAX);
+    assert_eq!(
+        buf,
+        [0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]
+    );
+
+    let mut buf = Vec::new();
+    encode_int32_field_always(&mut buf, 16, -1);
+    let mut expected = vec![0x80, 0x01];
+    expected.extend_from_slice(&TEN_FF_01);
+    assert_eq!(buf, expected, "multi-byte tag, field 16");
+}
+
+#[test]
+fn skip_and_always_variants_nonzero_and_zero_literals() {
+    let mut buf = Vec::new();
+    encode_int32_field(&mut buf, 1, 0);
+    encode_uint32_field(&mut buf, 5, 0);
+    encode_fixed32_field(&mut buf, 1, 0);
+    encode_fixed64_field(&mut buf, 1, 0);
+    encode_sint32_field(&mut buf, 1, 0);
+    assert!(buf.is_empty());
+
+    let mut buf = Vec::new();
+    encode_int32_field(&mut buf, 1, 42);
+    encode_uint32_field(&mut buf, 5, u32::MAX);
+    encode_int32_field_always(&mut buf, 1, 300);
+    encode_uint32_field_always(&mut buf, 5, 300);
+    encode_varint_field_always(&mut buf, 1, 300);
+    encode_int64_field_always(&mut buf, 1, 300);
+    encode_sint32_field_always(&mut buf, 1, -1);
+    assert_eq!(
+        buf,
+        [
+            0x08, 0x2A, // int32 42
+            0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, // uint32 MAX
+            0x08, 0xAC, 0x02, // int32 always 300
+            0x28, 0xAC, 0x02, // uint32 always 300
+            0x08, 0xAC, 0x02, // varint always 300
+            0x08, 0xAC, 0x02, // int64 always 300
+            0x08, 0x01, // sint32 always -1
+        ]
+    );
+}
+
+#[test]
+fn fixed_width_encoders_literal_bytes() {
+    let mut buf = Vec::new();
+    encode_fixed32_field(&mut buf, 1, 0x0102_0304);
+    assert_eq!(buf, [0x0D, 0x04, 0x03, 0x02, 0x01]);
+
+    let mut buf = Vec::new();
+    encode_fixed32_field_always(&mut buf, 1, 0);
+    assert_eq!(buf, [0x0D, 0, 0, 0, 0]);
+
+    let mut buf = Vec::new();
+    encode_fixed64_field(&mut buf, 2, 0x0102_0304_0506_0708);
+    assert_eq!(buf, [0x11, 8, 7, 6, 5, 4, 3, 2, 1]);
+
+    let mut buf = Vec::new();
+    encode_fixed64_field_always(&mut buf, 2, 0);
+    assert_eq!(buf, [0x11, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    // 1.0f32 = 0x3F80_0000, -2.5f32 = 0xC020_0000
+    let mut buf = Vec::new();
+    encode_float_field(&mut buf, 4, 1.0);
+    encode_float_field_always(&mut buf, 4, -2.5);
+    encode_float_field_always(&mut buf, 4, 0.0);
+    assert_eq!(
+        buf,
+        [
+            0x25, 0x00, 0x00, 0x80, 0x3F, //
+            0x25, 0x00, 0x00, 0x20, 0xC0, //
+            0x25, 0x00, 0x00, 0x00, 0x00,
+        ]
+    );
+
+    // 1.0f64 = 0x3FF0_0000_0000_0000, -2.5f64 = 0xC004_0000_0000_0000
+    let mut buf = Vec::new();
+    encode_double_field(&mut buf, 5, 1.0);
+    encode_double_field_always(&mut buf, 5, -2.5);
+    encode_double_field_always(&mut buf, 5, 0.0);
+    assert_eq!(
+        buf,
+        [
+            0x29, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F, //
+            0x29, 0, 0, 0, 0, 0, 0, 0x04, 0xC0, //
+            0x29, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+    );
+}
+
+#[test]
+fn packed_encoders_literal_bytes() {
+    let mut scratch = Vec::new();
+
+    let mut buf = Vec::new();
+    encode_packed_sint64(
+        &mut buf,
+        &mut scratch,
+        1,
+        &[0, 1, -1, 2, -2, i64::MAX, i64::MIN],
+    );
+    let mut expected = vec![0x0A, 25, 0x00, 0x02, 0x01, 0x04, 0x03];
+    expected.extend_from_slice(&[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+    expected.extend_from_slice(&TEN_FF_01);
+    assert_eq!(buf, expected);
+
+    let mut buf = Vec::new();
+    encode_packed_int32(&mut buf, &mut scratch, 4, &[0, 1, -1, 127, -128, 300]);
+    let mut expected = vec![0x22, 25, 0x00, 0x01];
+    expected.extend_from_slice(&TEN_FF_01);
+    expected.push(0x7F);
+    // -128 sign-extends to 0xFFFF_FFFF_FFFF_FF80.
+    expected.extend_from_slice(&[0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+    expected.extend_from_slice(&[0xAC, 0x02]);
+    assert_eq!(buf, expected);
+
+    let mut buf = Vec::new();
+    encode_packed_bool(&mut buf, 5, &[true, false, true, true, false]);
+    assert_eq!(buf, [0x2A, 0x05, 0x01, 0x00, 0x01, 0x01, 0x00]);
+
+    let mut buf = Vec::new();
+    encode_packed_uint32(&mut buf, &mut scratch, 2, &[0, 1, 127, 128, 300, u32::MAX]);
+    assert_eq!(
+        buf,
+        [
+            0x12, 0x0C, 0x00, 0x01, 0x7F, 0x80, 0x01, 0xAC, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F
+        ]
+    );
+}
+
+#[test]
+fn packed_empty_input_writes_nothing_for_every_encoder() {
+    let mut buf = Vec::new();
+    let mut scratch = Vec::new();
+    encode_packed_uint32(&mut buf, &mut scratch, 1, &[]);
+    encode_packed_int32(&mut buf, &mut scratch, 1, &[]);
+    encode_packed_sint64(&mut buf, &mut scratch, 1, &[]);
+    encode_packed_sint32(&mut buf, &mut scratch, 1, &[]);
+    encode_packed_bool(&mut buf, 1, &[]);
+    assert!(buf.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Append semantics and scratch reuse
+// ---------------------------------------------------------------------------
+
+/// A scratch buffer holding stale bytes that must never reach the output.
+fn dirty() -> Vec<u8> {
+    vec![0xEE; 40]
+}
+
+#[test]
+fn packed_encoders_append_after_prefix_with_dirty_scratch() {
+    let mut buf = vec![0xAA, 0xBB];
+    let mut scratch = dirty();
+
+    encode_packed_uint32(&mut buf, &mut scratch, 2, &[1, 300]);
+    assert_eq!(buf, [0xAA, 0xBB, 0x12, 0x03, 0x01, 0xAC, 0x02]);
+    // Empty input in between leaves buf untouched.
+    encode_packed_uint32(&mut buf, &mut scratch, 2, &[]);
+    assert_eq!(buf.len(), 7);
+    encode_packed_uint32(&mut buf, &mut scratch, 2, &[5]);
+    assert_eq!(&buf[7..], [0x12, 0x01, 0x05]);
+
+    let mut buf = vec![0xAA];
+    let mut scratch = dirty();
+    encode_packed_int32(&mut buf, &mut scratch, 8, &[-1]);
+    encode_packed_int32(&mut buf, &mut scratch, 8, &[]);
+    encode_packed_int32(&mut buf, &mut scratch, 8, &[2]);
+    let mut expected = vec![0xAA, 0x42, 0x0A];
+    expected.extend_from_slice(&TEN_FF_01);
+    expected.extend_from_slice(&[0x42, 0x01, 0x02]);
+    assert_eq!(buf, expected);
+
+    let mut buf = vec![0xAA];
+    let mut scratch = dirty();
+    encode_packed_sint64(&mut buf, &mut scratch, 1, &[-1, 1]);
+    encode_packed_sint64(&mut buf, &mut scratch, 1, &[]);
+    encode_packed_sint64(&mut buf, &mut scratch, 1, &[0]);
+    assert_eq!(buf, [0xAA, 0x0A, 0x02, 0x01, 0x02, 0x0A, 0x01, 0x00]);
+
+    let mut buf = vec![0xAA];
+    let mut scratch = dirty();
+    encode_packed_sint32(&mut buf, &mut scratch, 3, &[-2, 2]);
+    encode_packed_sint32(&mut buf, &mut scratch, 3, &[]);
+    encode_packed_sint32(&mut buf, &mut scratch, 3, &[i32::MIN]);
+    assert_eq!(
+        buf,
+        [
+            0xAA, 0x1A, 0x02, 0x03, 0x04, 0x1A, 0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F
+        ]
+    );
+
+    let mut buf = vec![0xAA];
+    encode_packed_bool(&mut buf, 5, &[true, false]);
+    encode_packed_bool(&mut buf, 5, &[]);
+    encode_packed_bool(&mut buf, 5, &[true]);
+    assert_eq!(buf, [0xAA, 0x2A, 0x02, 0x01, 0x00, 0x2A, 0x01, 0x01]);
+}
+
+#[test]
+fn field_encoders_append_after_prefix() {
+    let mut buf = vec![0xAA];
+    encode_varint_field(&mut buf, 1, 1);
+    encode_int64_field(&mut buf, 1, 2);
+    encode_int32_field(&mut buf, 1, 3);
+    encode_uint32_field(&mut buf, 1, 4);
+    encode_bool_field(&mut buf, 1, true);
+    encode_bytes_field(&mut buf, 1, b"x");
+    encode_sint64_field(&mut buf, 1, -3);
+    encode_sint32_field(&mut buf, 1, 3);
+    encode_fixed32_field(&mut buf, 1, 1);
+    encode_fixed64_field(&mut buf, 1, 1);
+    encode_float_field(&mut buf, 1, 1.0);
+    encode_double_field(&mut buf, 1, 1.0);
+    assert_eq!(
+        buf,
+        [
+            0xAA, //
+            0x08, 0x01, //
+            0x08, 0x02, //
+            0x08, 0x03, //
+            0x08, 0x04, //
+            0x08, 0x01, //
+            0x0A, 0x01, b'x', //
+            0x08, 0x05, //
+            0x08, 0x06, //
+            0x0D, 0x01, 0x00, 0x00, 0x00, //
+            0x09, 0x01, 0, 0, 0, 0, 0, 0, 0, //
+            0x0D, 0x00, 0x00, 0x80, 0x3F, //
+            0x09, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Documented conversions and pass-through behaviours
+// ---------------------------------------------------------------------------
+
+/// Drain an iterator, then check it stays finished.
+fn drain_twice<I: Iterator>(mut it: I) -> Vec<I::Item> {
+    let items: Vec<I::Item> = it.by_ref().collect();
+    assert!(it.next().is_none(), "iterator resumed");
+    items
+}
+
+#[test]
+fn packed_uint32_truncates_wider_varints() {
+    let mut body = vec![0x81, 0x80, 0x80, 0x80, 0x10]; // 2^32 + 1
+    body.extend_from_slice(&TEN_FF_01); // u64::MAX
+    body.push(SENTINEL);
+    assert_eq!(
+        drain_twice(PackedUint32Iter::new(&body)),
+        [1, u32::MAX, u32::from(SENTINEL)]
+    );
+}
+
+#[test]
+fn packed_int32_truncates_wider_varints() {
+    let mut body = vec![0x81, 0x80, 0x80, 0x80, 0x10]; // 2^32 + 1 -> 1
+    body.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]); // 0xFFFF_FFFF -> -1
+    body.extend_from_slice(&TEN_FF_01); // sign-extended -1
+    body.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x08]); // 0x8000_0000
+    body.push(SENTINEL);
+    assert_eq!(
+        drain_twice(PackedInt32Iter::new(&body)),
+        [1, -1, -1, i32::MIN, i32::from(SENTINEL)]
+    );
+}
+
+#[test]
+fn packed_int64_negative_values() {
+    let mut body = TEN_FF_01.to_vec(); // -1
+    body.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]); // MIN
+    body.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]); // MAX
+    body.push(SENTINEL);
+    assert_eq!(
+        drain_twice(PackedInt64Iter::new(&body)),
+        [-1, i64::MIN, i64::MAX, i64::from(SENTINEL)]
+    );
+}
+
+#[test]
+fn packed_bool_non_canonical_values() {
+    let mut body = vec![0x02]; // 2 -> true
+    body.extend_from_slice(&[0x80, 0x01]); // 128 -> true
+    body.extend_from_slice(&[0x80, 0x00]); // non-canonical zero -> false
+    body.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]); // 2^63
+    body.push(0x00);
+    body.push(0x01);
+    assert_eq!(
+        drain_twice(PackedBoolIter::new(&body)),
+        [true, true, false, true, false, true]
+    );
+}
+
+#[test]
+fn read_tag_passes_reserved_wire_types_through() {
+    // Field 1 with wire types 3, 4, 6, 7, then a plain varint tag.
+    let data = [0x0B, 0x0C, 0x0E, 0x0F, 0x08];
+    let mut c = Cursor::new(&data);
+    for wt in [3, 4, 6, 7, 0] {
+        assert_eq!(c.read_tag().unwrap(), Some((1, wt)));
+    }
+    assert!(c.read_tag().unwrap().is_none());
+}
+
+#[test]
+fn packed_truncated_tails_stop_after_valid_values() {
+    let body = [0x02, 0x80];
+    assert_eq!(drain_twice(PackedSint64Iter::new(&body)), [1]);
+    assert_eq!(drain_twice(PackedSint32Iter::new(&body)), [1]);
+    assert_eq!(drain_twice(PackedInt64Iter::new(&body)), [2]);
+    assert_eq!(drain_twice(PackedInt32Iter::new(&body)), [2]);
+    assert_eq!(drain_twice(PackedUint32Iter::new(&body)), [2]);
+    assert_eq!(drain_twice(PackedBoolIter::new(&body)), [true]);
+}
+
+#[test]
+fn cumulative_stops_on_truncated_tail() {
+    let cases: [(&[u8], &[i64]); 4] = [
+        (&[0x02, 0x80], &[11]),
+        (&[0x02, 0x04, 0xFF, 0xFF], &[11, 13]),
+        (&[0x80], &[]),
+        (&[0x02, 0xAC], &[11]),
+    ];
+    for (body, expected) in cases {
+        let mut out = Vec::new();
+        decode_packed_sint64_cumulative(body, 10, &mut out);
+        assert_eq!(out, expected, "body {body:02X?}");
+        // The iterator agrees on how many values precede the truncation.
+        assert_eq!(PackedSint64Iter::new(body).count(), expected.len());
+    }
+}
+
+#[test]
+fn cumulative_over_every_canonical_width() {
+    // Each canonical varint as one zigzag delta: covers both sides of every
+    // seven-bit width boundary, which the old 8-value sweep did not.
+    for &(value, bytes) in CANONICAL_VARINTS {
+        let mut out = Vec::new();
+        decode_packed_sint64_cumulative(bytes, 0, &mut out);
+        assert_eq!(out, [zigzag_decode_64(value)], "varint {value}");
+    }
+}
+
+#[test]
+fn cumulative_literal_bodies() {
+    let mut out = Vec::new();
+    // deltas 10, -3, 7, -1, 20
+    decode_packed_sint64_cumulative(&[0x14, 0x05, 0x0E, 0x01, 0x28], 0, &mut out);
+    assert_eq!(out, [10, 7, 14, 13, 33]);
+
+    let mut out = Vec::new();
+    // deltas 5, -2, 8 from base 1000
+    decode_packed_sint64_cumulative(&[0x0A, 0x03, 0x10], 1000, &mut out);
+    assert_eq!(out, [1005, 1003, 1011]);
+
+    // Single deltas at width boundaries, with their hand-zigzagged bytes.
+    let table: [(i64, &[u8]); 8] = [
+        (63, &[0x7E]),
+        (64, &[0x80, 0x01]),
+        (127, &[0xFE, 0x01]),
+        (128, &[0x80, 0x02]),
+        (8191, &[0xFE, 0x7F]),
+        (8192, &[0x80, 0x80, 0x01]),
+        (16383, &[0xFE, 0xFF, 0x01]),
+        (16384, &[0x80, 0x80, 0x02]),
+    ];
+    for (delta, body) in table {
+        let mut out = Vec::new();
+        decode_packed_sint64_cumulative(body, 0, &mut out);
+        assert_eq!(out, [delta]);
+    }
+
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(&TEN_FF_01, 0, &mut out);
+    assert_eq!(out, [i64::MIN]);
+    let mut out = Vec::new();
+    decode_packed_sint64_cumulative(
+        &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+        0,
+        &mut out,
+    );
+    assert_eq!(out, [i64::MAX]);
+}
+
+// ---------------------------------------------------------------------------
+// Zero-copy: results borrow the right region of the input
+// ---------------------------------------------------------------------------
+
+#[test]
+fn len_delimited_and_raw_field_borrow_from_input() {
+    let data = [0x0A, 0x03, b'a', b'b', b'c', 0x08, 0x2A];
+    let mut c = Cursor::new(&data);
+    let _ = c.read_tag().unwrap().unwrap();
+    let payload = c.read_len_delimited().unwrap();
+    assert!(std::ptr::eq(payload, &data[2..5]));
+
+    let _ = c.read_tag().unwrap().unwrap();
+    let raw = c.read_raw_field(WIRE_VARINT).unwrap();
+    assert!(std::ptr::eq(raw, &data[6..7]));
+
+    let mut c = Cursor::new(&data);
+    let _ = c.read_tag().unwrap().unwrap();
+    let raw = c.read_raw_field(WIRE_LEN).unwrap();
+    assert!(std::ptr::eq(raw, &data[1..5]));
 }

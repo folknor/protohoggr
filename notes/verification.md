@@ -33,75 +33,6 @@ only gate.
 
 ## Tests
 
-## VER-001 - Encoders are checked mostly by roundtrip, not against literal wire bytes
-
-Many tests encode and decode with protohoggr and compare, so an encoder and
-decoder that go wrong the same way cannot fail them. The `zigzag_encode_32`
-sign-extension bug (fixed in 496598c) passed
-`sint32_field_encode_decode_roundtrip` this way; the fix added literal vectors
-for sint32 only. Sites still roundtrip-only or length-only:
-
-- `int64_field_encode_decode_roundtrip`: no literal bytes for a negative int64.
-- `int32_field_negative_sign_extends` accepts any eleven bytes, and
-  `packed_int32_negative` checks tag, length prefix and total length but not
-  the ten payload bytes. Both pass with wrong encoded values.
-- `packed_sint64_`, `packed_int32_`, `packed_bool_encode_decode_roundtrip`.
-- All fixed-width encoders (`fixed32`, `fixed64`, `float`, `double`): no
-  literal bytes; byte order is pinned only transitively through
-  `read_fixed32`/`read_fixed64` tests built on `to_le_bytes`.
-- `encode_to_slice_*` and `unchecked_*`: output checked only by
-  `read_varint`, which is itself pinned by literal tests (opus/tests calls
-  this acceptable but implicit).
-- `cumulative_roundtrip`, `_with_base`, `cumulative_boundary_values`,
-  `cumulative_extreme_deltas`: input produced by `encode_packed_sint64`.
-- codex/tests: the "boundary sweep" omits several seven-bit width boundaries.
-
-Proposed: a shared literal conformance corpus of (value, expected bytes,
-expected consumed length), with encoders and decoders run independently
-against it, covering both sides of every seven-bit width boundary; at least
-one golden row per encoder on a threshold-crossing value (negative, bit 31 or
-63 set, multi-byte tag). opus/tests suggests taking bytes from the spec or
-`protoc --encode` output checked in as literals. Keep roundtrips as a second
-layer. Enforceable by the corpus tests, mutation testing (codex/tests), and
-structurally if skip/always pairs are generated (see VER-008).
-
-Reported by: codex/tests, opus/tests.
-
-## VER-002 - `int64_field_positive` can pass with no assertion executed
-
-It hand-decodes the varint after the tag and asserts only inside the loop when
-it finds a terminal byte. Tag-only output, an unterminated payload, or
-trailing bytes after a correct value all pass. It also maintains a second
-varint decoder inside the test.
-
-Proposed: `assert_eq!(buf, [0x08, 0x89, 0x27])` (codex/tests, opus/tests), or
-decode with `Cursor` and assert the cursor is empty (opus/machinery).
-Enforceable by the rewritten test plus mutation testing (codex/tests);
-opus/machinery: no general lint, only a review rule against asserts that sit
-inside loop conditionals.
-
-Reported by: codex/tests, opus/tests, opus/machinery.
-
-## VER-006 - Tests whose names or comments claim something they do not do
-
-- `zigzag_decode_roundtrip` checks known values and never roundtrips.
-- `zigzag_encode_decode_roundtrip` covers only the 64-bit pair; the 32-bit
-  pair, which CHANGELOG now calls "a pure 32-bit bijection", has no roundtrip.
-  Proposed: a strided `u32` sweep in debug, exhaustive in a release lane.
-- `int32_field_positive_roundtrip` decodes with `read_varint` (u64) because
-  `Cursor` has no int32 reader though it has `read_varint_i64`; the caller-side
-  `as i32` path is untested (opus/tests calls this a small API gap).
-- `count_varints_17_bytes` / `count_varints_32_bytes` say they exercise the
-  SIMD chunk "on x86-64"; elsewhere the same names run the scalar fallback.
-  The unit tests in `src/lib.rs` now name each backend they check.
-- `cumulative_stops_on_overflow_varint` comment says "A valid varint [0x01]"
-  but the data is `[0x02]` (opus/machinery).
-- `cumulative_stops_matches_packed_iter_on_overflow`: see VER-007.
-
-Enforceable: one-off rewrites; opus/tests says not mechanically holdable.
-
-Reported by: opus/tests, opus/machinery.
-
 ## VER-007 - `decode_packed_sint64_cumulative` "mirrors `PackedSint64Iter`" is held by one case and a hand copy
 
 The batch decoder re-implements the varint loop inline. The doc and CHANGELOG
@@ -131,17 +62,8 @@ case among missing vectors (VER-010).
 
 ## VER-008 - Skip-zero variants and packed empties are partly untested, and the pairs are hand-synced copies
 
-Coverage gaps (opus/tests table, codex/tests):
-
-- `encode_int32_field` and `encode_uint32_field`: zero omission never tested;
-  their `_always` variants never called with non-zero values.
-- `encode_fixed32_field`, `encode_fixed64_field`: never called with non-zero
-  input; `float`/`double` skip variants only with `-0.0`. If
-  `encode_fixed32_field` wrote a `WIRE_64BIT` tag or 8 bytes, nothing fails.
-- Empty-input skip tested only for `encode_packed_uint32` and
-  `encode_packed_bool`; not `_int32`, `_sint64`, `_sint32`.
-
-Structural cause: the 24 field encoders are 12 pairs where the skip variant
+The coverage gaps are closed by literal-byte tests. What remains is the
+structural cause: the 24 field encoders are 12 pairs where the skip variant
 duplicates the `_always` body instead of calling it, and the six typed packed
 iterators are six copies of the same ~50 lines. `packed_typed_iter_empty`,
 `_remaining_bytes` and the `check_size_hint` macro list the six types by hand,
@@ -155,64 +77,6 @@ always-zero and always-nonzero cases per family and wire bytes independent of
 the implementation. Enforceable structurally.
 
 Reported by: codex/tests, opus/tests.
-
-## VER-009 - Scratch-buffer reuse and append semantics are never exercised
-
-Every packed-encoder test passes a fresh `Vec::new()` as scratch and every
-encoder test starts from an empty `buf`. Removing `scratch.clear()` from any
-packed encoder, or an encoder that clears or overwrites `buf`, would pass.
-`multi_field_message_roundtrip` and `read_raw_field_roundtrip` cover appends
-only indirectly and for no packed encoder. codex/tests: whether scratch
-contents after an empty call are meaningful is undocumented; the
-implementation preserves them.
-
-Proposed: per packed encoder, reuse a dirty scratch and a pre-filled `buf` and
-assert exact output after the prefix, with empty input between non-empty
-calls; a `dirty()` fixture helper as the default spelling. Structural
-alternative: an owned `PackedEncoder` that clears internally (opus/tests).
-Enforceable only by test convention, or by the structural change.
-
-Reported by: codex/tests, opus/tests.
-
-## VER-010 - Documented conversion and pass-through behaviours have no direct vectors
-
-Missing (codex/tests):
-
-- wider raw varints truncating through `PackedUint32Iter` and
-  `PackedInt32Iter` (documented, now as protobuf's specified conversion; the
-  uint32 roundtrip supplies only fitting values);
-- negative packed int64 (`PackedInt64Iter` tested only with non-negative);
-- non-canonical bools (values other than 0 and 1, multi-byte varints);
-- reserved wire types passing through `read_tag` (documented behaviour);
-- truncated packed tails, and cumulative decoding stopping on truncation.
-
-Proposed: literal input/output tables, each followed by a sentinel value to
-prove complete consumption. codex/tests: these are compatibility claims, not a
-request for adversarial validation.
-
-Reported by: codex/tests.
-
-## VER-011 - Float tests use tolerance where the contract is bit-exact, and zero-copy is never shown
-
-- `read_float` / `read_double` assert `(decoded - val).abs() < EPSILON`; the
-  contract is bit-exact, which the later roundtrip tests already spell as
-  `to_bits()`. `float_nan_roundtrip` / `double_nan_roundtrip` assert only
-  `is_nan()`, so NaN payload and sign destruction would pass. The tests need
-  `#[allow(clippy::approx_constant)]` only because they chose 3.14 and
-  2.718281828 (opus/tests).
-- opus/machinery: `float_cmp = "deny"` pushes tests toward the weaker
-  approximate assertion, while `float_infinity_roundtrip` and the `-0.0` tests
-  use `assert_eq!` on floats, which the lint does not see inside the macro, so
-  the lint is enforced inconsistently.
-- `read_len_delimited` and raw-field tests compare slice contents and never
-  show the result borrows the right region of the input (codex/tests).
-
-Proposed: `to_bits()` everywhere, literal IEEE bit patterns including distinct
-NaN payloads and signed zero; pointer-and-length assertions for borrowed
-slices. Enforceable by tests; a textlint rule against `EPSILON` in `tests/`
-(opus/machinery).
-
-Reported by: codex/tests, opus/tests, opus/machinery.
 
 ## VER-018 - The check builds and tests a host-tuned artifact under a user-global cargo config
 
