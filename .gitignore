@@ -2,3 +2,9 @@ target
 .*.swp
 .*.swo
 .idea
+.plans
+.claude
+.codex
+.agents
+research
+
