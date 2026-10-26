@@ -73,6 +73,72 @@ fn decode_varint_11byte_rejected() {
     assert!(c.read_varint().is_err());
 }
 
+/// A 10-byte varint whose last byte overflows `u64`, as a terminal byte
+/// (`0x02`) and as a continuation byte (`0x80`), each followed by a valid
+/// tag + varint field. The bad varint abandons the input: the cursor is left
+/// at the end, the same state a truncated varint leaves, and the trailing
+/// field is not reachable.
+#[test]
+fn decode_varint_overflow_abandons_input() {
+    for last in [0x02u8, 0x80] {
+        let mut data = vec![0xFF; 9];
+        data.extend_from_slice(&[last, 0x08, 0x01]);
+        let mut c = Cursor::new(&data);
+        assert!(c.read_varint().is_err(), "last={last:#x}");
+        assert!(c.is_empty(), "last={last:#x}");
+        assert_eq!(c.remaining(), 0, "last={last:#x}");
+        assert_eq!(c.position(), data.len(), "last={last:#x}");
+        assert!(c.read_tag().unwrap().is_none(), "last={last:#x}");
+    }
+}
+
+#[test]
+fn decode_varint_truncated_leaves_cursor_at_end() {
+    let data = [0x08, 0x80, 0x80];
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_varint().unwrap(), 8);
+    assert!(c.read_varint().is_err());
+    assert_eq!(c.position(), data.len());
+}
+
+/// Composed readers: a malformed varint abandons the input, a well-formed
+/// varint rejected for its value is consumed and nothing more.
+#[test]
+fn composed_readers_malformed_vs_rejected_value() {
+    let mut overflow = vec![0xFF; 9];
+    overflow.extend_from_slice(&[0x02, 0x08, 0x01]);
+
+    let mut c = Cursor::new(&overflow);
+    assert!(c.read_tag().is_err());
+    assert!(c.is_empty());
+    let mut c = Cursor::new(&overflow);
+    assert!(c.read_len_delimited().is_err());
+    assert!(c.is_empty());
+    let mut c = Cursor::new(&overflow);
+    assert!(c.read_varint_u32().is_err());
+    assert!(c.is_empty());
+    let mut c = Cursor::new(&overflow);
+    assert!(c.read_sint64().is_err());
+    assert!(c.is_empty());
+
+    // u32::MAX + 1 is a well-formed 5-byte varint: consumed, then rejected.
+    let mut too_big = Vec::new();
+    encode_varint(&mut too_big, u64::from(u32::MAX) + 1);
+    let used = too_big.len();
+    too_big.extend_from_slice(&[0x08, 0x01]);
+    let mut c = Cursor::new(&too_big);
+    assert!(c.read_varint_u32().is_err());
+    assert_eq!(c.position(), used);
+    let mut c = Cursor::new(&too_big);
+    assert!(c.read_tag().is_err());
+    assert_eq!(c.position(), used);
+
+    // Tag with field number 0: consumed, then rejected.
+    let mut c = Cursor::new(&[0x00, 0x08, 0x01]);
+    assert!(c.read_tag().is_err());
+    assert_eq!(c.position(), 1);
+}
+
 #[test]
 fn decode_varint_u32_valid() {
     let mut buf = Vec::new();
@@ -270,6 +336,78 @@ fn packed_iter_empty() {
     let vals: Vec<u64> = PackedIter::new(&[]).collect();
     assert!(vals.is_empty());
     assert!(PackedIter::empty().is_empty());
+}
+
+/// Packed bodies with a malformed varint followed by valid data, and how many
+/// values precede the bad varint. Overflow with a terminal 10th byte, overflow
+/// with a continuation 10th byte, and a truncated tail.
+fn malformed_packed_bodies() -> Vec<(Vec<u8>, usize)> {
+    let mut cases = Vec::new();
+    for last in [0x02u8, 0x80] {
+        let mut data = vec![0x04, 0x06];
+        data.extend_from_slice(&[0xFF; 9]);
+        data.push(last);
+        data.extend_from_slice(&[0x02, 0x04, 0x06]);
+        cases.push((data, 2));
+    }
+    cases.push((vec![0x04, 0x80, 0x80], 1));
+    cases
+}
+
+/// After the first `None`, every later `next()` is `None` too, the iterator
+/// reports no bytes left, and a clone of it is just as finished.
+/// The `FusedIterator` bound is the compile-time half of the check.
+fn assert_fused_on_malformed<'a, I>(
+    name: &str,
+    new: fn(&'a [u8]) -> I,
+    is_empty: fn(&I) -> bool,
+    remaining_bytes: fn(&I) -> usize,
+    data: &'a [u8],
+    valid: usize,
+) where
+    I: std::iter::FusedIterator + Clone,
+{
+    let mut it = new(data);
+    assert_eq!(
+        it.by_ref().take(valid + 1).count(),
+        valid,
+        "{name} {data:?}"
+    );
+    for _ in 0..4 {
+        assert!(it.next().is_none(), "{name} resumed on {data:?}");
+    }
+    assert!(is_empty(&it), "{name} {data:?}");
+    assert_eq!(remaining_bytes(&it), 0, "{name} {data:?}");
+    assert_eq!(it.size_hint(), (0, Some(0)), "{name} {data:?}");
+    let mut clone = it.clone();
+    assert!(clone.next().is_none(), "{name} clone {data:?}");
+    assert!(is_empty(&clone), "{name} clone {data:?}");
+}
+
+macro_rules! check_fused {
+    ($ty:ident, $data:expr, $valid:expr) => {
+        assert_fused_on_malformed(
+            stringify!($ty),
+            $ty::new,
+            $ty::is_empty,
+            $ty::remaining_bytes,
+            $data,
+            $valid,
+        )
+    };
+}
+
+#[test]
+fn packed_iters_stay_finished_after_decode_error() {
+    for (data, valid) in malformed_packed_bodies() {
+        check_fused!(PackedIter, &data, valid);
+        check_fused!(PackedSint64Iter, &data, valid);
+        check_fused!(PackedSint32Iter, &data, valid);
+        check_fused!(PackedInt64Iter, &data, valid);
+        check_fused!(PackedInt32Iter, &data, valid);
+        check_fused!(PackedUint32Iter, &data, valid);
+        check_fused!(PackedBoolIter, &data, valid);
+    }
 }
 
 #[test]
@@ -1766,8 +1904,12 @@ fn cumulative_stops_matches_packed_iter_on_overflow() {
     data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]);
     data.push(0x02); // Another valid varint that should NOT be reached.
 
-    // PackedSint64Iter behavior: collect decoded values.
-    let iter_values: Vec<i64> = PackedSint64Iter::new(&data).collect();
+    // PackedSint64Iter behavior. Collecting stops at the first None, so it
+    // cannot tell a stopped iterator from one that would resume; call next()
+    // again afterwards to check the trailing value is really unreachable.
+    let mut iter = PackedSint64Iter::new(&data);
+    let iter_values: Vec<i64> = iter.by_ref().collect();
+    assert!(iter.next().is_none(), "iterator resumed past the overflow");
 
     // Batch decoder with base=0, cumulative.
     let mut batch_out = Vec::new();

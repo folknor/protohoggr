@@ -5,6 +5,7 @@
 //! dependencies - pure Rust, no std beyond default.
 
 use std::fmt;
+use std::iter::FusedIterator;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -59,10 +60,11 @@ pub struct Cursor<'a> {
     data: &'a [u8],
     /// Invariant: `pos <= data.len()`. [`rest`](Cursor::rest) relies on it
     /// for soundness, so every write to `pos` must preserve it. Each one
-    /// advances past bytes it has just bounds-checked, except in
-    /// `read_varint_unchecked`, whose caller contract forbids reading past
-    /// the end (a violation is an out-of-bounds read, already UB, before
-    /// `pos` could pass `data.len()`).
+    /// either advances past bytes it has just bounds-checked or sets `pos`
+    /// to `data.len()` (abandoning the input after a malformed varint),
+    /// except in `read_varint_unchecked`, whose caller contract forbids
+    /// reading past the end (a violation is an out-of-bounds read, already
+    /// UB, before `pos` could pass `data.len()`).
     pos: usize,
 }
 
@@ -136,6 +138,12 @@ impl<'a> Cursor<'a> {
 
     /// Read a varint (LEB128). Fast path for single-byte values.
     ///
+    /// A malformed varint - truncated by the end of the data, or a 10th byte
+    /// that overflows `u64` - is an `Err` and leaves the cursor at the end of
+    /// its data: the rest of the input is abandoned, never resumed from
+    /// inside the bad varint. Record [`position`](Self::position) before the
+    /// read if the start of the failed varint matters.
+    ///
     /// This scalar implementation intentionally does NOT use SIMD. Benchmarked
     /// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSSE3): scalar is
     /// 2.3× faster than SIMD batch4 decode for 1-byte varints (the dominant
@@ -168,6 +176,11 @@ impl<'a> Cursor<'a> {
             if shift == 63 {
                 // 10th byte: only the low bit is valid payload for a u64.
                 if b > 1 {
+                    // Abandon the rest of the input, the same end state a
+                    // truncated varint reaches. Callers that swallow errors
+                    // (the packed iterators) then stop for good instead of
+                    // resuming mid-garbage at the next byte.
+                    self.pos = self.data.len();
                     return Err(wire_error("varint overflows u64"));
                 }
                 val |= u64::from(b) << 63;
@@ -177,10 +190,9 @@ impl<'a> Cursor<'a> {
             if b < 0x80 {
                 return Ok(val);
             }
+            // Reaches at most 63: the `shift == 63` arm above returns on
+            // every path, so a varint can never run past ten bytes here.
             shift += 7;
-            if shift > 63 {
-                return Err(wire_error("varint too long"));
-            }
         }
     }
 
@@ -235,6 +247,10 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read a varint and validate it fits in a `u32`.
+    ///
+    /// A malformed varint leaves the cursor at the end, as in
+    /// [`read_varint`](Self::read_varint). A well-formed value above
+    /// `u32::MAX` is an `Err` with the varint consumed.
     #[inline]
     pub fn read_varint_u32(&mut self) -> WireResult<u32> {
         let v = self.read_varint()?;
@@ -307,6 +323,10 @@ impl<'a> Cursor<'a> {
     /// Reserved/invalid wire types (3, 4, 6, 7) are returned as-is -
     /// validation is left to the caller or to `skip_field`, which will
     /// reject unknown types. This keeps the hot path branch-free.
+    ///
+    /// A malformed tag varint leaves the cursor at the end, as in
+    /// [`read_varint`](Self::read_varint); a well-formed tag rejected for
+    /// its value (above `u32::MAX`, or field number 0) leaves it consumed.
     #[inline]
     pub fn read_tag(&mut self) -> WireResult<Option<(u32, u32)>> {
         if self.is_empty() {
@@ -324,7 +344,9 @@ impl<'a> Cursor<'a> {
     ///
     /// A length prefix larger than the remaining input - including one that
     /// does not fit in `usize` - is an `Err`. The prefix varint has been
-    /// consumed by then; the payload has not.
+    /// consumed by then; the payload has not. A malformed prefix varint
+    /// instead leaves the cursor at the end, as in
+    /// [`read_varint`](Self::read_varint).
     #[inline]
     pub fn read_len_delimited(&mut self) -> WireResult<&'a [u8]> {
         let len = self.read_varint()?;
@@ -449,6 +471,11 @@ const fn sint32_wire_bits(v: u64) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Base packed varint iterator. Yields raw `u64` values.
+///
+/// A malformed varint ends iteration for good: it yields `None` and so does
+/// every later call (the iterator is fused). This holds for all the typed
+/// wrappers too. There is no way to tell a decode error from the end of the
+/// data; use [`Cursor::read_varint`] in a loop when errors matter.
 #[derive(Clone)]
 pub struct PackedIter<'a> {
     cursor: Cursor<'a>,
@@ -473,14 +500,16 @@ impl<'a> PackedIter<'a> {
         }
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cursor.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -501,6 +530,10 @@ impl Iterator for PackedIter<'_> {
         // well-formed protobuf data they always contain complete varints.
         // A fallible iterator would add per-element overhead for a case
         // that cannot happen with valid wire data.
+        //
+        // Fusion rests on `read_varint` leaving the cursor at the end on
+        // every error, so the `is_empty` check above ends every later call.
+        // That keeps this hot path free of any error-state bookkeeping.
         self.cursor.read_varint().ok()
     }
 
@@ -535,14 +568,16 @@ impl<'a> PackedSint64Iter<'a> {
         Self(PackedIter::empty())
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -586,14 +621,16 @@ impl<'a> PackedSint32Iter<'a> {
         Self(PackedIter::empty())
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -634,14 +671,16 @@ impl<'a> PackedInt64Iter<'a> {
         Self(PackedIter::empty())
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -688,14 +727,16 @@ impl<'a> PackedInt32Iter<'a> {
         Self(PackedIter::empty())
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -742,14 +783,16 @@ impl<'a> PackedUint32Iter<'a> {
         Self(PackedIter::empty())
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -791,14 +834,16 @@ impl<'a> PackedBoolIter<'a> {
         Self(PackedIter::empty())
     }
 
-    /// Returns `true` if no bytes remain.
+    /// Returns `true` if no bytes remain to be decoded - at the end of the
+    /// data, and after a decode error, which abandons the rest.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of undecoded bytes remaining.
+    /// Returns the number of bytes remaining to be decoded; zero at the end
+    /// of the data and after a decode error.
     #[inline]
     #[must_use]
     pub fn remaining_bytes(&self) -> usize {
@@ -819,6 +864,17 @@ impl Iterator for PackedBoolIter<'_> {
         self.0.size_hint()
     }
 }
+
+// `PackedIter` returns `None` only once its cursor is at the end (exhausted,
+// or abandoned by a failed `read_varint`), and the cursor never moves back.
+// Each wrapper maps `PackedIter::next` through a pure function.
+impl FusedIterator for PackedIter<'_> {}
+impl FusedIterator for PackedSint64Iter<'_> {}
+impl FusedIterator for PackedSint32Iter<'_> {}
+impl FusedIterator for PackedInt64Iter<'_> {}
+impl FusedIterator for PackedInt32Iter<'_> {}
+impl FusedIterator for PackedUint32Iter<'_> {}
+impl FusedIterator for PackedBoolIter<'_> {}
 
 // ---------------------------------------------------------------------------
 // Batch packed-field operations
@@ -899,8 +955,9 @@ unsafe fn count_packed_varints_sse2(data: &[u8]) -> usize {
 /// Appends results to `out` without clearing it. The caller controls whether
 /// to clear `out` beforehand.
 ///
-/// Mirrors [`PackedSint64Iter`] semantics: decode errors (truncated tail) are
-/// silently swallowed, ending iteration. This is a batch operation for trusted
+/// Mirrors [`PackedSint64Iter`] semantics: a malformed varint (truncated or
+/// overflowing) is silently swallowed and ends decoding for good; nothing
+/// after it is appended. This is a batch operation for trusted
 /// wire data, not a strict validator.
 ///
 /// Accumulation uses wrapping `i64` addition - no overflow checks.

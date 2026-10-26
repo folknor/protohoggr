@@ -19,35 +19,6 @@ Defects turned up by the verification hunt of 2026-10-26. Unverified: each is
 what the hunters reported, and the fix pass decides. "Reported by" names the
 hunter and scope (`codex/tests`, `opus/machinery` and so on).
 
-## BUG-002 - Packed iterators resume after returning `None` on a decode error
-
-`PackedIter::next` returns `self.cursor.read_varint().ok()`. On the overflow
-error the cursor has already advanced past the ten bad bytes, so the next
-`next()` decodes from the following byte and can return `Some`. The iterator
-is not fused and does not implement `FusedIterator`; the six typed wrappers
-inherit this. The doc language ("errors are swallowed as None, ending
-iteration") and `cumulative_stops_matches_packed_iter_on_overflow` (the
-trailing value "should NOT be reached") both describe permanent stopping, but
-the test uses `collect()`, which stops at the first `None`, so resumption is
-never checked. `decode_packed_sint64_cumulative` stops for good, so the two
-diverge here.
-
-opus/tests adds that the two error kinds leave different observable state:
-after a truncated tail `is_empty()` is true, after an overflow it is false.
-codex/tests notes Rust permits non-fused iterators, so this is a mismatch with
-the project's stopping language rather than a violation of `Iterator` itself.
-
-Proposed fix: on error set the cursor to the end (or record termination),
-implement `FusedIterator` on all seven iterator types, and expose error
-detection explicitly if wanted (`fn errored(&self) -> bool` or a `try_`
-iterator) rather than through `is_empty()` side effects (opus/tests).
-
-Enforcement proposed: tests that call `next()` repeatedly after `None` for the
-base iterator and every wrapper. The `FusedIterator` impl is a type-level
-promise but does not enforce itself (codex/tests).
-
-Reported by: codex/tests, codex/machinery, opus/tests.
-
 ## BUG-003 - `PackedIter::size_hint` lower bound is wrong on accepted malformed input
 
 `size_hint` returns `(remaining / 10, Some(remaining))`; the comment says

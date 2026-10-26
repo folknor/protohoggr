@@ -11,7 +11,7 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 This crate is optimized for **speed on well-formed protobuf data**, not for adversarial input validation. It was extracted from an OpenStreetMap PBF pipeline where throughput matters and the wire data is trusted.
 
-Concretely: varint/tag decoding validates overflow and rejects malformed sequences, but packed iterators silently end on truncated data (rather than returning `Result` per element), `skip_varint` has no length limit, and `read_tag` passes through reserved wire types without filtering. These are intentional trade-offs documented in the source - see the doc comments on `PackedIter::next`, `skip_varint`, and `read_tag`.
+Concretely: varint/tag decoding validates overflow and rejects malformed sequences, but packed iterators silently end, for good, at the first malformed varint (rather than returning `Result` per element), `skip_varint` has no length limit, and `read_tag` passes through reserved wire types without filtering. These are intentional trade-offs documented in the source - see the doc comments on `PackedIter::next`, `skip_varint`, and `read_tag`.
 
 The 32-bit decoders (`read_sint32` and the `int32`, `uint32` and `sint32` packed iterators) truncate wider varints to 32 bits without a range check. That is not a trade-off: it is protobuf's specified conversion, and it is what lets them read values written under a wider field type.
 
