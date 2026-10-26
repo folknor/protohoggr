@@ -1,17 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `zigzag_encode_32` sign-extended results with bit 31 set (inputs `>= 2^30` or `<= -2^30 - 1`, e.g. `i32::MIN`) to `u64`, so `encode_sint32_field`, `encode_sint32_field_always` and `encode_packed_sint32` wrote those values as non-canonical 10-byte varints instead of 5 bytes. Both protohoggr `sint32` decoding paths truncate to 32 bits before zigzag decoding, so the values read back correctly, but data written by earlier versions can contain this form and readers should keep accepting it
+
+### Breaking
+- `zigzag_encode_32` now returns `u32` and `zigzag_decode_32` now takes `u32`, making the pair a pure 32-bit bijection. Widen encoder output with `u64::from`; narrow a raw varint with `as u32` before decoding. `Cursor::read_sint32` and `PackedSint32Iter` do this truncation themselves, per protobuf's rule that a `sint32` varint is truncated to 32 bits before zigzag decoding
+
 ## 0.4.0
 
 ### Added
-- `count_packed_varints(data)` — count varint terminals in a packed field; SSE2 SIMD on x86-64, scalar fallback elsewhere
-- `decode_packed_sint64_cumulative(data, base, out)` — batch decode an entire packed sint64 field with cumulative sum, replacing per-element `PackedSint64Iter` + manual accumulation; append semantics, wrapping i64 addition, mirrors packed iterator error-swallowing behavior
-- `encode_varint_to_slice(buf, value)` — `unsafe` slice-based varint encode (contract: `buf.len() >= 10`), with branchless 1-byte and 2-byte fast paths for values < 16384 (~95% of zigzag-encoded OSM way-ref deltas)
-- `Cursor::read_varint_unchecked()` — `unsafe` infallible varint read that skips all bounds checks; safety contract requires a complete well-formed varint at the current position
+- `count_packed_varints(data)` - count varint terminals in a packed field; SSE2 SIMD on x86-64, scalar fallback elsewhere
+- `decode_packed_sint64_cumulative(data, base, out)` - batch decode an entire packed sint64 field with cumulative sum, replacing per-element `PackedSint64Iter` + manual accumulation; append semantics, wrapping i64 addition, mirrors packed iterator error-swallowing behavior
+- `encode_varint_to_slice(buf, value)` - `unsafe` slice-based varint encode (contract: `buf.len() >= 10`), with branchless 1-byte and 2-byte fast paths for values < 16384 (~95% of zigzag-encoded OSM way-ref deltas)
+- `Cursor::read_varint_unchecked()` - `unsafe` infallible varint read that skips all bounds checks; safety contract requires a complete well-formed varint at the current position
 
 ## 0.3.0
 
 ### Added
-- `Cursor::read_raw_field(wire_type)` — returns raw value bytes without decoding, for verbatim field copying
+- `Cursor::read_raw_field(wire_type)` - returns raw value bytes without decoding, for verbatim field copying
 - `#[must_use]` on all public constructors, accessors, and pure functions
 - `missing_docs` (rust), `must_use_candidate`, `doc_markdown`, `inline_always`, `missing_safety_doc` (clippy) lints denied
 - Doc comments on all public API items
@@ -36,8 +44,8 @@
 First standalone release, extracted from [pbfhogg](https://github.com/folknor/pbfhogg).
 
 ### Decoding
-- `Cursor` — zero-copy reader over `&[u8]`: varints (LEB128), zigzag sint64/sint32, tags, length-delimited fields, fixed32/fixed64, float/double, skip, position tracking
-- `PackedIter` — base packed varint iterator yielding raw `u64`
+- `Cursor` - zero-copy reader over `&[u8]`: varints (LEB128), zigzag sint64/sint32, tags, length-delimited fields, fixed32/fixed64, float/double, skip, position tracking
+- `PackedIter` - base packed varint iterator yielding raw `u64`
 - Typed packed iterators: `PackedSint64Iter`, `PackedSint32Iter`, `PackedInt64Iter`, `PackedInt32Iter`, `PackedUint32Iter`, `PackedBoolIter`
 - All packed iterators expose `new()`, `empty()`, `is_empty()`, `remaining_bytes()`
 
@@ -48,6 +56,6 @@ First standalone release, extracted from [pbfhogg](https://github.com/folknor/pb
 - Packed repeated encoders: uint32, int32, sint64, sint32, bool
 
 ### Other
-- Zero external dependencies — pure Rust, std only
+- Zero external dependencies - pure Rust, std only
 - Dual-licensed MIT OR Apache-2.0
-- Benchmarked scalar vs varint-simd SSSE3/SSE2 — scalar wins 2-6× on decode, 1.5-3.5× on encode
+- Benchmarked scalar vs varint-simd SSSE3/SSE2 - scalar wins 2-6× on decode, 1.5-3.5× on encode

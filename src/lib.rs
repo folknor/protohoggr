@@ -2,7 +2,7 @@
 //!
 //! Provides varint encoding/decoding, zigzag encoding/decoding, a cursor-based
 //! decoder, field-level encoders, and packed repeated field helpers. No external
-//! dependencies — pure Rust, no std beyond default.
+//! dependencies - pure Rust, no std beyond default.
 
 use std::fmt;
 
@@ -50,7 +50,7 @@ pub const WIRE_LEN: u32 = 2;
 pub const WIRE_32BIT: u32 = 5;
 
 // ---------------------------------------------------------------------------
-// Cursor — zero-copy reader over a byte slice
+// Cursor - zero-copy reader over a byte slice
 // ---------------------------------------------------------------------------
 
 /// Zero-copy cursor for reading protobuf wire format from a byte slice.
@@ -94,7 +94,7 @@ impl<'a> Cursor<'a> {
     /// This scalar implementation intentionally does NOT use SIMD. Benchmarked
     /// (criterion, 8000 packed sint64, varint-simd v0.4.1 SSSE3): scalar is
     /// 2.3× faster than SIMD batch4 decode for 1-byte varints (the dominant
-    /// OSM case — dense node id/lat/lon deltas) and tied for 3-byte varints.
+    /// OSM case - dense node id/lat/lon deltas) and tied for 3-byte varints.
     /// The 1-byte fast path below is perfectly predicted by the CPU branch
     /// predictor, beating SSE shuffle + mask overhead. See `notes/SIMD.md` in
     /// pbfhogg (dd7f69a) for the full research doc (P3-20, closed).
@@ -144,7 +144,7 @@ impl<'a> Cursor<'a> {
     /// This is the **unchecked decoding** counterpart to
     /// [`read_varint`](Cursor::read_varint): both bounds checks (slice end)
     /// and value-shape checks (overflow, overlong) are removed. The caller is
-    /// responsible for ensuring the data is well-formed — this is not merely
+    /// responsible for ensuring the data is well-formed - this is not merely
     /// "unchecked bounds."
     ///
     /// # Safety
@@ -168,7 +168,7 @@ impl<'a> Cursor<'a> {
         if b < 0x80 {
             return u64::from(b);
         }
-        // SAFETY: caller guarantees completeness — slow path won't read OOB.
+        // SAFETY: caller guarantees completeness - slow path won't read OOB.
         unsafe { self.read_varint_unchecked_slow(u64::from(b & 0x7F)) }
     }
 
@@ -215,10 +215,15 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read a zigzag-encoded `sint32` value.
+    ///
+    /// The full varint is consumed and validated, then truncated to 32 bits
+    /// without a range check before zigzag decoding, as protobuf specifies.
+    /// This also accepts the sign-extended 10-byte form that earlier
+    /// protohoggr versions wrote for large-magnitude values.
     #[inline]
     pub fn read_sint32(&mut self) -> WireResult<i32> {
         let v = self.read_varint()?;
-        Ok(zigzag_decode_32(v))
+        Ok(zigzag_decode_32(sint32_wire_bits(v)))
     }
 
     /// Read a little-endian 32-bit fixed-width value.
@@ -264,7 +269,7 @@ impl<'a> Cursor<'a> {
     /// Read a (`field_number`, `wire_type`) tag. Returns `None` at EOF.
     ///
     /// Returns `Err` if the field number is 0 (invalid per protobuf spec).
-    /// Reserved/invalid wire types (3, 4, 6, 7) are returned as-is —
+    /// Reserved/invalid wire types (3, 4, 6, 7) are returned as-is -
     /// validation is left to the caller or to `skip_field`, which will
     /// reject unknown types. This keeps the hot path branch-free.
     #[inline]
@@ -296,7 +301,7 @@ impl<'a> Cursor<'a> {
     /// Skip a varint by scanning for the terminating byte (MSB=0)
     /// without decoding the value.
     ///
-    /// Note: this intentionally has no length limit — it will skip varints
+    /// Note: this intentionally has no length limit - it will skip varints
     /// longer than 10 bytes. This is a raw byte scanner for speed, not a
     /// value decoder. For trusted protobuf data (our use case), varints are
     /// always well-formed. Use `read_varint` when overflow validation matters.
@@ -320,7 +325,7 @@ impl<'a> Cursor<'a> {
     /// the 4/8 fixed bytes for `WIRE_32BIT`/`WIRE_64BIT`).
     ///
     /// This is useful for copying unknown fields verbatim without re-encoding.
-    /// The tag is NOT included — the caller already has it from `read_tag()`.
+    /// The tag is NOT included - the caller already has it from `read_tag()`.
     #[inline]
     pub fn read_raw_field(&mut self, wire_type: u32) -> WireResult<&'a [u8]> {
         let start = self.pos;
@@ -371,22 +376,35 @@ pub fn zigzag_decode_64(v: u64) -> i64 {
     signed ^ sign
 }
 
-/// Zigzag-decode a `u64` varint into a signed `i32` (truncates to 32 bits first).
+/// Zigzag-decode a 32-bit value into a signed `i32`. Inverse of
+/// [`zigzag_encode_32`].
 ///
-/// Intentionally truncates without validation — `sint32` varints are at most
-/// 5 bytes on the wire, and in valid protobuf data the upper bits are always
-/// zero. Checking would add overhead on every packed element for a case that
-/// doesn't occur with well-formed data.
+/// Takes `u32`, not the raw `u64` varint: narrowing a wire value is the
+/// caller's job, and the order matters. Protobuf truncates a `sint32` varint
+/// to 32 bits and then zigzag-decodes, which is not the same as decoding 64
+/// bits and casting. [`Cursor::read_sint32`] and [`PackedSint32Iter`] do this.
 #[inline]
 #[must_use]
-pub fn zigzag_decode_32(v: u64) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    let v32 = v as u32;
+pub fn zigzag_decode_32(v32: u32) -> i32 {
     #[allow(clippy::cast_possible_wrap)]
     let signed = (v32 >> 1) as i32;
     #[allow(clippy::cast_possible_wrap)]
     let sign = -((v32 & 1) as i32);
     signed ^ sign
+}
+
+/// Narrow a raw `sint32` varint to the 32 bits that get zigzag-decoded.
+///
+/// Discarding the upper bits without checking them is protobuf's specified
+/// behavior, not a shortcut: when a `sint64` field is read as `sint32`,
+/// protobuf truncates the encoded varint to 32 bits before zigzag decoding.
+/// It also keeps reading data written by earlier protohoggr versions, whose
+/// `sint32` encoders sign-extended zigzag values with bit 31 set into 10-byte
+/// varints.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+const fn sint32_wire_bits(v: u64) -> u32 {
+    v as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +528,9 @@ impl Iterator for PackedSint64Iter<'_> {
 }
 
 /// Packed iterator yielding zigzag-decoded `i32` values (`sint32`).
+///
+/// Like [`Cursor::read_sint32`], truncates each varint to 32 bits without a
+/// range check before zigzag decoding.
 #[derive(Clone)]
 pub struct PackedSint32Iter<'a>(PackedIter<'a>);
 
@@ -548,7 +569,7 @@ impl Iterator for PackedSint32Iter<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<i32> {
-        self.0.next().map(zigzag_decode_32)
+        self.0.next().map(|v| zigzag_decode_32(sint32_wire_bits(v)))
     }
 
     #[inline]
@@ -608,10 +629,10 @@ impl Iterator for PackedInt64Iter<'_> {
 
 /// Packed iterator yielding `i32` values (`int32`).
 ///
-/// Truncates each `u64` varint to `i32` without overflow validation.
-/// Valid `int32` packed fields never contain varints exceeding 32-bit
-/// range, so checking would add per-element overhead for a case that
-/// doesn't occur with well-formed data.
+/// Truncates each `u64` varint to `i32` without overflow validation. That is
+/// protobuf's specified conversion, not a shortcut: a wire value that doesn't
+/// fit the field type reads as if cast to it in C++, and wider values do occur
+/// in valid data, e.g. after an `int64` field is changed to `int32`.
 #[derive(Clone)]
 pub struct PackedInt32Iter<'a>(PackedIter<'a>);
 
@@ -662,10 +683,10 @@ impl Iterator for PackedInt32Iter<'_> {
 
 /// Packed iterator yielding `u32` values (`uint32`).
 ///
-/// Truncates each `u64` varint to `u32` without overflow validation.
-/// Valid `uint32` packed fields never contain varints exceeding 32-bit
-/// range, so checking would add per-element overhead for a case that
-/// doesn't occur with well-formed data.
+/// Truncates each `u64` varint to `u32` without overflow validation. That is
+/// protobuf's specified conversion, not a shortcut: a wire value that doesn't
+/// fit the field type reads as if cast to it in C++, and wider values do occur
+/// in valid data, e.g. after a `uint64` field is changed to `uint32`.
 #[derive(Clone)]
 pub struct PackedUint32Iter<'a>(PackedIter<'a>);
 
@@ -778,7 +799,7 @@ impl Iterator for PackedBoolIter<'_> {
 pub fn count_packed_varints(data: &[u8]) -> usize {
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: SSE2 is baseline on x86-64 — always available.
+        // SAFETY: SSE2 is baseline on x86-64 - always available.
         unsafe { count_packed_varints_sse2(data) }
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -845,7 +866,7 @@ unsafe fn count_packed_varints_sse2(data: &[u8]) -> usize {
 /// silently swallowed, ending iteration. This is a batch operation for trusted
 /// wire data, not a strict validator.
 ///
-/// Accumulation uses wrapping `i64` addition — no overflow checks.
+/// Accumulation uses wrapping `i64` addition - no overflow checks.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64>) {
     let count = count_packed_varints(data);
@@ -875,14 +896,14 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
         let mut shift: u32 = 7;
         loop {
             if pos >= len {
-                // Truncated varint — stop silently (packed iterator semantics).
+                // Truncated varint - stop silently (packed iterator semantics).
                 return;
             }
             let b = data[pos];
             pos += 1;
             if shift == 63 {
                 // 10th byte: only the low bit is valid for u64. If b > 1,
-                // this is an overflow — stop silently, matching PackedIter
+                // this is an overflow - stop silently, matching PackedIter
                 // which delegates to read_varint → Err → .ok() → None.
                 if b > 1 {
                     return;
@@ -896,7 +917,7 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
             }
             shift += 7;
             if shift > 63 {
-                // Overlong varint — stop silently.
+                // Overlong varint - stop silently.
                 return;
             }
         }
@@ -977,12 +998,18 @@ pub fn zigzag_encode_64(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
 }
 
-/// Zigzag-encode a signed 32-bit integer for `sint32` fields.
+/// Zigzag-encode a signed 32-bit integer for `sint32` fields. Inverse of
+/// [`zigzag_decode_32`].
+///
+/// Returns `u32`; widening it for the wire with `u64::from` zero-extends and
+/// gives the canonical varint of at most 5 bytes. Casting the signed
+/// intermediate with `as u64` would instead sign-extend results with bit 31
+/// set into a 10-byte varint.
 #[inline]
 #[must_use]
 #[allow(clippy::cast_sign_loss)]
-pub fn zigzag_encode_32(v: i32) -> u64 {
-    ((v << 1) ^ (v >> 31)) as u64
+pub fn zigzag_encode_32(v: i32) -> u32 {
+    ((v << 1) ^ (v >> 31)) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -997,7 +1024,10 @@ pub fn zigzag_encode_32(v: i32) -> u64 {
 /// 2^29 − 1), or if `wire_type` exceeds 7 (only 3 bits are available).
 #[inline]
 pub fn encode_tag(buf: &mut Vec<u8>, field: u32, wire_type: u32) {
-    assert!(field > 0 && field <= 0x1FFF_FFFF, "field number out of range");
+    assert!(
+        field > 0 && field <= 0x1FFF_FFFF,
+        "field number out of range"
+    );
     assert!(wire_type <= 7, "wire type out of range");
     encode_varint(buf, u64::from(field << 3 | wire_type));
 }
@@ -1134,7 +1164,7 @@ pub fn encode_sint64_field_always(buf: &mut Vec<u8>, field: u32, value: i64) {
 pub fn encode_sint32_field(buf: &mut Vec<u8>, field: u32, value: i32) {
     if value != 0 {
         encode_tag(buf, field, WIRE_VARINT);
-        encode_varint(buf, zigzag_encode_32(value));
+        encode_varint(buf, u64::from(zigzag_encode_32(value)));
     }
 }
 
@@ -1142,7 +1172,7 @@ pub fn encode_sint32_field(buf: &mut Vec<u8>, field: u32, value: i32) {
 #[inline]
 pub fn encode_sint32_field_always(buf: &mut Vec<u8>, field: u32, value: i32) {
     encode_tag(buf, field, WIRE_VARINT);
-    encode_varint(buf, zigzag_encode_32(value));
+    encode_varint(buf, u64::from(zigzag_encode_32(value)));
 }
 
 /// Encode a `fixed32` field. Skips if `value == 0`.
@@ -1218,12 +1248,7 @@ pub fn encode_double_field_always(buf: &mut Vec<u8>, field: u32, value: f64) {
 // ---------------------------------------------------------------------------
 
 /// Encode a packed repeated `uint32` field.
-pub fn encode_packed_uint32(
-    buf: &mut Vec<u8>,
-    scratch: &mut Vec<u8>,
-    field: u32,
-    values: &[u32],
-) {
+pub fn encode_packed_uint32(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32, values: &[u32]) {
     if values.is_empty() {
         return;
     }
@@ -1236,12 +1261,7 @@ pub fn encode_packed_uint32(
 
 /// Encode a packed repeated `int32` field.
 #[allow(clippy::cast_sign_loss)]
-pub fn encode_packed_int32(
-    buf: &mut Vec<u8>,
-    scratch: &mut Vec<u8>,
-    field: u32,
-    values: &[i32],
-) {
+pub fn encode_packed_int32(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32, values: &[i32]) {
     if values.is_empty() {
         return;
     }
@@ -1253,12 +1273,7 @@ pub fn encode_packed_int32(
 }
 
 /// Encode a packed repeated `sint64` field (zigzag + varint).
-pub fn encode_packed_sint64(
-    buf: &mut Vec<u8>,
-    scratch: &mut Vec<u8>,
-    field: u32,
-    values: &[i64],
-) {
+pub fn encode_packed_sint64(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32, values: &[i64]) {
     if values.is_empty() {
         return;
     }
@@ -1270,18 +1285,13 @@ pub fn encode_packed_sint64(
 }
 
 /// Encode a packed repeated `sint32` field (zigzag + varint).
-pub fn encode_packed_sint32(
-    buf: &mut Vec<u8>,
-    scratch: &mut Vec<u8>,
-    field: u32,
-    values: &[i32],
-) {
+pub fn encode_packed_sint32(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32, values: &[i32]) {
     if values.is_empty() {
         return;
     }
     scratch.clear();
     for &v in values {
-        encode_varint(scratch, zigzag_encode_32(v));
+        encode_varint(scratch, u64::from(zigzag_encode_32(v)));
     }
     encode_bytes_field(buf, field, scratch);
 }
@@ -1289,7 +1299,7 @@ pub fn encode_packed_sint32(
 /// Encode a packed repeated `bool` field.
 ///
 /// Bools are always exactly 1 byte on the wire, so this skips the scratch
-/// buffer and writes directly — length is just `values.len()`.
+/// buffer and writes directly - length is just `values.len()`.
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode_packed_bool(buf: &mut Vec<u8>, field: u32, values: &[bool]) {
     if values.is_empty() {

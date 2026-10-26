@@ -3,21 +3,21 @@
 //! Run with: cargo bench --bench varint
 //!
 //! ## Decode scenarios (8000 zigzag-encoded sint64 deltas)
-//! 1. scalar    — current `PackedSint64Iter`
-//! 2. simd_batch — `decode_four_unsafe<u16>` for ≤2-byte varints (small deltas),
+//! 1. scalar    - current `PackedSint64Iter`
+//! 2. `simd_batch` - `decode_four_unsafe<u16>` for ≤2-byte varints (small deltas),
 //!    `decode_two_unsafe<u32>` for ≤5-byte varints (large deltas)
-//! 3. simd_single — safe `decode::<u64>` one at a time
+//! 3. `simd_single` - safe `decode::<u64>` one at a time
 //!
 //! ## Encode scenarios
-//! 4. scalar    — current `encode_packed_sint64`
-//! 5. simd_single — `encode_to_slice` per value
+//! 4. scalar    - current `encode_packed_sint64`
+//! 5. `simd_single` - `encode_to_slice` per value
 //!
 //! ## Type constraints on batch decode
 //!   `decode_four_unsafe` reads 16 bytes and requires the sum of max varint bytes ≤ 16.
-//!   u16 (max 3 bytes) → 4×3=12 ✓, u32 (max 5 bytes) → 4×5=20 ✗.
-//!   `decode_two_unsafe` → u32: 2×5=10 ✓, u64: 2×10=20 ✗.
+//!   u16 (max 3 bytes) → 4×3=12 [x], u32 (max 5 bytes) → 4×5=20 [ ].
+//!   `decode_two_unsafe` → u32: 2×5=10 [x], u64: 2×10=20 [ ].
 //!   So for sint64 values that happen to fit in u32 (most OSM deltas), the best batch
-//!   decode is decode_two<u32>; for tiny deltas (≤u16), decode_four<u16> is available.
+//!   decode is `decode_two<u32>`; for tiny deltas (≤u16), `decode_four<u16>` is available.
 
 #![allow(
     clippy::unwrap_used,
@@ -26,11 +26,9 @@
     clippy::cast_possible_wrap
 )]
 
-use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use protohoggr::{
-    PackedSint64Iter, encode_packed_sint64, zigzag_decode_64, zigzag_encode_64,
-};
+use protohoggr::{PackedSint64Iter, encode_packed_sint64, zigzag_decode_64, zigzag_encode_64};
+use std::hint::black_box;
 
 const N: usize = 8000;
 
@@ -99,7 +97,7 @@ fn bench_decode_small(group: &mut criterion::BenchmarkGroup<criterion::measureme
         });
     });
 
-    // 2) simd batch — decode_four_unsafe<u16×4> (small deltas fit in u16)
+    // 2) simd batch - decode_four_unsafe<u16×4> (small deltas fit in u16)
     group.bench_with_input(BenchmarkId::new("simd_batch4_u16", label), &pad, |b, d| {
         b.iter(|| {
             let mut pos = 0usize;
@@ -108,7 +106,15 @@ fn bench_decode_small(group: &mut criterion::BenchmarkGroup<criterion::measureme
             while pos < batch_end {
                 let ptr = d[pos..].as_ptr();
                 let (a, bv, cv, dv, la, lb, lc, ld, _overflow): (
-                    u16, u16, u16, u16, u8, u8, u8, u8, bool,
+                    u16,
+                    u16,
+                    u16,
+                    u16,
+                    u8,
+                    u8,
+                    u8,
+                    u8,
+                    bool,
                 ) = unsafe { varint_simd::decode::decode_four_unsafe(ptr) };
                 black_box(zigzag_decode_64(u64::from(a)));
                 black_box(zigzag_decode_64(u64::from(bv)));
@@ -160,7 +166,7 @@ fn bench_decode_large(group: &mut criterion::BenchmarkGroup<criterion::measureme
         });
     });
 
-    // 2) simd batch — decode_two_unsafe<u32,u32> (large deltas fit in u32)
+    // 2) simd batch - decode_two_unsafe<u32,u32> (large deltas fit in u32)
     group.bench_with_input(BenchmarkId::new("simd_batch2_u32", label), &pad, |b, d| {
         b.iter(|| {
             let mut pos = 0usize;
@@ -263,22 +269,18 @@ fn bench_encode(c: &mut Criterion) {
         });
 
         // 5) varint-simd encode_to_slice per value
-        group.bench_with_input(
-            BenchmarkId::new("simd_single", label),
-            values,
-            |b, vals| {
-                let mut out = vec![0u8; vals.len() * 10];
-                b.iter(|| {
-                    let mut pos = 0usize;
-                    for &v in black_box(vals) {
-                        let zz = zigzag_encode_64(v);
-                        let len = varint_simd::encode::encode_to_slice(zz, &mut out[pos..]);
-                        pos += usize::from(len);
-                    }
-                    black_box(pos);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("simd_single", label), values, |b, vals| {
+            let mut out = vec![0u8; vals.len() * 10];
+            b.iter(|| {
+                let mut pos = 0usize;
+                for &v in black_box(vals) {
+                    let zz = zigzag_encode_64(v);
+                    let len = varint_simd::encode::encode_to_slice(zz, &mut out[pos..]);
+                    pos += usize::from(len);
+                }
+                black_box(pos);
+            });
+        });
     }
 
     group.finish();

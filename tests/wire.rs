@@ -49,7 +49,7 @@ fn decode_varint_10byte_max_valid() {
 
 #[test]
 fn decode_varint_10byte_overflow() {
-    // Same as above but final byte is 0x02 — overflows u64
+    // Same as above but final byte is 0x02 - overflows u64
     let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
     let mut c = Cursor::new(&data);
     assert!(c.read_varint().is_err());
@@ -57,7 +57,7 @@ fn decode_varint_10byte_overflow() {
 
 #[test]
 fn decode_varint_10byte_overflow_high() {
-    // Final byte 0x7F — way beyond u64
+    // Final byte 0x7F - way beyond u64
     let data = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F];
     let mut c = Cursor::new(&data);
     assert!(c.read_varint().is_err());
@@ -65,8 +65,10 @@ fn decode_varint_10byte_overflow_high() {
 
 #[test]
 fn decode_varint_11byte_rejected() {
-    // 11 continuation bytes — too long regardless of final byte
-    let data = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00];
+    // 11 continuation bytes - too long regardless of final byte
+    let data = [
+        0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+    ];
     let mut c = Cursor::new(&data);
     assert!(c.read_varint().is_err());
 }
@@ -111,7 +113,10 @@ fn decode_read_tag_field_zero() {
     for wire_type in 0..=7u8 {
         let data = [wire_type];
         let mut c = Cursor::new(&data);
-        assert!(c.read_tag().is_err(), "tag with field 0, wire_type {wire_type} should error");
+        assert!(
+            c.read_tag().is_err(),
+            "tag with field 0, wire_type {wire_type} should error"
+        );
     }
 }
 
@@ -152,7 +157,11 @@ fn decode_sint32_standalone() {
         let mut buf = Vec::new();
         encode_varint(&mut buf, raw);
         let mut c = Cursor::new(&buf);
-        assert_eq!(c.read_sint32().unwrap(), expected, "sint32 failed for raw={raw}");
+        assert_eq!(
+            c.read_sint32().unwrap(),
+            expected,
+            "sint32 failed for raw={raw}"
+        );
     }
 }
 
@@ -162,13 +171,13 @@ fn decode_sint32_standalone() {
 
 #[test]
 fn skip_varint_overlength() {
-    // 11 continuation bytes + terminator — not a valid varint (>10 bytes).
+    // 11 continuation bytes + terminator - not a valid varint (>10 bytes).
     // skip_varint has no length check (by design it just scans for MSB=0),
     // so this documents that it skips overlength sequences without error.
     let mut data = vec![0x80; 11];
     data.push(0x00); // terminator
     let mut c = Cursor::new(&data);
-    // skip_varint accepts this — it's a raw byte scanner, not a value decoder
+    // skip_varint accepts this - it's a raw byte scanner, not a value decoder
     c.skip_varint().unwrap();
     assert!(c.is_empty());
 }
@@ -594,6 +603,14 @@ fn zigzag_encode_32_known_values() {
     assert_eq!(zigzag_encode_32(-1), 1);
     assert_eq!(zigzag_encode_32(1), 2);
     assert_eq!(zigzag_encode_32(-2), 3);
+    // Both sides of the bit-31 threshold, which is asymmetric: -2^30 still
+    // fits in 31 bits, -2^30 - 1 does not.
+    assert_eq!(zigzag_encode_32((1 << 30) - 1), 0x7FFF_FFFE);
+    assert_eq!(zigzag_encode_32(1 << 30), 0x8000_0000);
+    assert_eq!(zigzag_encode_32(-(1 << 30)), 0x7FFF_FFFF);
+    assert_eq!(zigzag_encode_32(-(1 << 30) - 1), 0x8000_0001);
+    assert_eq!(zigzag_encode_32(i32::MAX), 0xFFFF_FFFE);
+    assert_eq!(zigzag_encode_32(i32::MIN), 0xFFFF_FFFF);
 }
 
 #[test]
@@ -1166,6 +1183,66 @@ fn sint32_field_always_writes_zero() {
 }
 
 #[test]
+fn sint32_field_extremes_are_five_bytes() {
+    // zigzag(i32::MIN) = 0xFFFF_FFFF: canonical 5-byte varint, not 10.
+    let mut buf = Vec::new();
+    encode_sint32_field(&mut buf, 1, i32::MIN);
+    assert_eq!(buf, [0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+
+    buf.clear();
+    encode_sint32_field(&mut buf, 1, 1 << 30);
+    assert_eq!(buf, [0x08, 0x80, 0x80, 0x80, 0x80, 0x08]);
+
+    buf.clear();
+    encode_sint32_field_always(&mut buf, 1, i32::MIN);
+    assert_eq!(buf, [0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+}
+
+#[test]
+fn sint32_decode_truncates_before_zigzag() {
+    // Raw 2^32: truncating to 32 bits first gives 0. Zigzag-decoding the
+    // 64-bit value and then casting would give i32::MIN instead.
+    let raw = [0x80, 0x80, 0x80, 0x80, 0x10];
+    let mut c = Cursor::new(&raw);
+    assert_eq!(c.read_sint32().unwrap(), 0);
+    assert!(c.is_empty());
+
+    let values: Vec<i32> = PackedSint32Iter::new(&raw).collect();
+    assert_eq!(values, [0]);
+}
+
+#[test]
+fn sint32_decode_accepts_sign_extended_ten_byte_form() {
+    // Versions before the zigzag_encode_32 fix wrote zigzag(i32::MIN) sign-extended
+    // to 64 bits. Files on disk carry this form, so decoders must keep accepting it.
+    // A following value (raw zigzag 2, which decodes to 1) proves the long varint is fully consumed.
+    let legacy = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02,
+    ];
+    let mut c = Cursor::new(&legacy);
+    assert_eq!(c.read_sint32().unwrap(), i32::MIN);
+    assert_eq!(c.read_sint32().unwrap(), 1);
+    assert!(c.is_empty());
+
+    let values: Vec<i32> = PackedSint32Iter::new(&legacy).collect();
+    assert_eq!(values, [i32::MIN, 1]);
+}
+
+#[test]
+fn packed_sint32_extremes_are_five_bytes() {
+    let mut buf = Vec::new();
+    let mut scratch = Vec::new();
+    encode_packed_sint32(&mut buf, &mut scratch, 1, &[i32::MIN, i32::MAX]);
+    // Tag, length 10, then two 5-byte varints.
+    assert_eq!(
+        buf,
+        [
+            0x0A, 10, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0xFE, 0xFF, 0xFF, 0xFF, 0x0F
+        ]
+    );
+}
+
+#[test]
 fn sint32_field_encode_decode_roundtrip() {
     for value in [0i32, 1, -1, 100, -100, i32::MAX, i32::MIN] {
         let mut buf = Vec::new();
@@ -1250,7 +1327,11 @@ fn float_field_encode_decode_roundtrip() {
         assert_eq!(field, 4);
         assert_eq!(wt, WIRE_32BIT);
         let decoded = c.read_float().unwrap();
-        assert_eq!(decoded.to_bits(), value.to_bits(), "roundtrip failed for {value}");
+        assert_eq!(
+            decoded.to_bits(),
+            value.to_bits(),
+            "roundtrip failed for {value}"
+        );
         assert!(c.is_empty());
     }
 }
@@ -1274,7 +1355,11 @@ fn double_field_encode_decode_roundtrip() {
         assert_eq!(field, 5);
         assert_eq!(wt, WIRE_64BIT);
         let decoded = c.read_double().unwrap();
-        assert_eq!(decoded.to_bits(), value.to_bits(), "roundtrip failed for {value}");
+        assert_eq!(
+            decoded.to_bits(),
+            value.to_bits(),
+            "roundtrip failed for {value}"
+        );
         assert!(c.is_empty());
     }
 }
@@ -1393,7 +1478,7 @@ fn count_varints_single() {
 
 #[test]
 fn count_varints_truncated_tail() {
-    // Continuation byte with no terminal — not counted.
+    // Continuation byte with no terminal - not counted.
     assert_eq!(count_packed_varints(&[0x80]), 0);
     // One complete varint [0x01] followed by a truncated one [0x80].
     assert_eq!(count_packed_varints(&[0x01, 0x80]), 1);
@@ -1417,10 +1502,9 @@ fn count_varints_32_bytes() {
 #[test]
 fn count_varints_32_bytes_mixed_continuation() {
     // 32 bytes, every other byte is a continuation byte.
-    let mut data = vec![0u8; 32];
-    for i in 0..32 {
-        data[i] = if i % 2 == 0 { 0x80 } else { 0x01 };
-    }
+    let data: Vec<u8> = (0..32)
+        .map(|i| if i % 2 == 0 { 0x80 } else { 0x01 })
+        .collect();
     // 16 terminal bytes (odd indices).
     assert_eq!(count_packed_varints(&data), 16);
 }
@@ -1498,7 +1582,7 @@ fn cumulative_roundtrip_with_base() {
 
 #[test]
 fn cumulative_append_semantics() {
-    // out already has elements — new results should be appended.
+    // out already has elements - new results should be appended.
     let mut out = vec![999i64, 888];
     // delta=1 → zigzag(1) = 2 = 0x02
     decode_packed_sint64_cumulative(&[0x02], 0, &mut out);
@@ -1554,7 +1638,7 @@ fn cumulative_wrapping() {
 #[test]
 fn cumulative_stops_on_overflow_varint() {
     // A valid varint [0x01] followed by a 10-byte varint whose final byte is
-    // 0x02 (overflows u64 — read_varint rejects this, PackedIter stops).
+    // 0x02 (overflows u64 - read_varint rejects this, PackedIter stops).
     // The batch decoder must also stop and not append the overflowing value.
     let mut data = vec![0x02]; // zigzag(2) = 1, so delta = 1
     // 9 continuation bytes (0xFF) + final byte 0x02 (overflow: 10th byte > 1)
@@ -1635,12 +1719,27 @@ fn encode_to_slice_max() {
 #[test]
 fn encode_to_slice_roundtrip_sweep() {
     // Sweep through varint size boundaries.
-    let values = [0u64, 1, 127, 128, 16383, 16384, 2097151, 2097152, u32::MAX as u64, u64::MAX];
+    let values = [
+        0u64,
+        1,
+        127,
+        128,
+        16383,
+        16384,
+        2097151,
+        2097152,
+        u32::MAX as u64,
+        u64::MAX,
+    ];
     let mut buf = [0u8; 10];
     for value in values {
         let n = unsafe { encode_varint_to_slice(&mut buf, value) };
         let mut c = Cursor::new(&buf[..n]);
-        assert_eq!(c.read_varint().unwrap(), value, "roundtrip failed for {value}");
+        assert_eq!(
+            c.read_varint().unwrap(),
+            value,
+            "roundtrip failed for {value}"
+        );
         assert!(c.is_empty(), "trailing bytes for {value}");
     }
 }
@@ -1686,7 +1785,17 @@ fn unchecked_u64_max() {
 #[test]
 fn unchecked_matches_checked() {
     // Verify identical results and cursor advancement for a range of valid values.
-    let values = [0u64, 1, 127, 128, 300, 16383, 16384, u32::MAX as u64, u64::MAX];
+    let values = [
+        0u64,
+        1,
+        127,
+        128,
+        300,
+        16383,
+        16384,
+        u32::MAX as u64,
+        u64::MAX,
+    ];
     for value in values {
         let mut buf = [0u8; 10];
         let n = unsafe { encode_varint_to_slice(&mut buf, value) };
@@ -1698,7 +1807,11 @@ fn unchecked_matches_checked() {
         let unchecked_val = unsafe { unchecked.read_varint_unchecked() };
 
         assert_eq!(checked_val, unchecked_val, "value mismatch for {value}");
-        assert_eq!(checked.position(), unchecked.position(), "position mismatch for {value}");
+        assert_eq!(
+            checked.position(),
+            unchecked.position(),
+            "position mismatch for {value}"
+        );
     }
 }
 
