@@ -410,37 +410,113 @@ fn packed_iters_stay_finished_after_decode_error() {
     }
 }
 
-#[test]
-fn packed_iter_size_hint() {
-    // 5 bytes of single-byte varints → (0, Some(5)) since min is remaining/10
-    let iter = PackedIter::new(&[0x01, 0x02, 0x03, 0x04, 0x05]);
-    let (lo, hi) = iter.size_hint();
-    assert_eq!(lo, 0); // 5 / 10 = 0
-    assert_eq!(hi, Some(5));
+/// Packed bodies that decode cleanly: one-byte, mixed-width, and ten-byte
+/// varints, including the two legal tenth bytes (`0x00` and `0x01`).
+fn well_formed_packed_bodies() -> Vec<Vec<u8>> {
+    let encode = |values: &[u64]| {
+        let mut buf = Vec::new();
+        for &v in values {
+            encode_varint(&mut buf, v);
+        }
+        buf
+    };
+    let mut overlong_zero = vec![0x80; 9];
+    overlong_zero.push(0x00);
+    overlong_zero.push(0x05);
+    vec![
+        Vec::new(),
+        encode(&[1, 2, 3, 4, 5]),
+        encode(&[1; 10]),
+        encode(&[1; 37]),
+        encode(&[0, 127, 128, 16_383, 16_384, 1 << 35, u64::MAX, 7, 300]),
+        encode(&[u64::MAX; 4]),
+        encode(&[u64::MAX, 1, u64::MAX >> 1, 2, 1 << 63]),
+        overlong_zero,
+    ]
+}
 
-    // 10 bytes → min is 1
-    let iter = PackedIter::new(&[0x01; 10]);
-    let (lo, hi) = iter.size_hint();
-    assert_eq!(lo, 1);
-    assert_eq!(hi, Some(10));
+/// At every step, `size_hint` brackets the number of items still to come.
+fn assert_size_hint_brackets<I: Iterator + Clone>(name: &str, mut it: I, data: &[u8]) {
+    loop {
+        let left = it.clone().count();
+        let (lo, hi) = it.size_hint();
+        assert!(lo <= left, "{name} lower {lo} > {left} on {data:?}");
+        assert!(
+            hi.is_some_and(|hi| left <= hi),
+            "{name} upper {hi:?} < {left} on {data:?}"
+        );
+        if it.next().is_none() {
+            break;
+        }
+    }
+}
+
+/// On malformed input only the upper bound is promised. The lower bound is
+/// a documented deviation: it can claim more items than the iterator yields.
+fn assert_size_hint_upper_holds<I: Iterator + Clone>(name: &str, mut it: I, data: &[u8]) {
+    loop {
+        let left = it.clone().count();
+        let (_, hi) = it.size_hint();
+        assert!(
+            hi.is_some_and(|hi| left <= hi),
+            "{name} upper {hi:?} < {left} on {data:?}"
+        );
+        if it.next().is_none() {
+            break;
+        }
+    }
+}
+
+macro_rules! check_size_hint {
+    ($check:ident, $data:expr) => {
+        $check("PackedIter", PackedIter::new($data), $data);
+        $check("PackedSint64Iter", PackedSint64Iter::new($data), $data);
+        $check("PackedSint32Iter", PackedSint32Iter::new($data), $data);
+        $check("PackedInt64Iter", PackedInt64Iter::new($data), $data);
+        $check("PackedInt32Iter", PackedInt32Iter::new($data), $data);
+        $check("PackedUint32Iter", PackedUint32Iter::new($data), $data);
+        $check("PackedBoolIter", PackedBoolIter::new($data), $data);
+    };
 }
 
 #[test]
-fn packed_typed_iter_size_hint() {
-    let data = [0x01, 0x02, 0x03, 0x04, 0x05];
-    // All typed wrappers delegate to PackedIter::size_hint
-    let (lo, hi) = PackedSint64Iter::new(&data).size_hint();
-    assert_eq!((lo, hi), (0, Some(5)));
-    let (lo, hi) = PackedSint32Iter::new(&data).size_hint();
-    assert_eq!((lo, hi), (0, Some(5)));
-    let (lo, hi) = PackedInt64Iter::new(&data).size_hint();
-    assert_eq!((lo, hi), (0, Some(5)));
-    let (lo, hi) = PackedInt32Iter::new(&data).size_hint();
-    assert_eq!((lo, hi), (0, Some(5)));
-    let (lo, hi) = PackedUint32Iter::new(&data).size_hint();
-    assert_eq!((lo, hi), (0, Some(5)));
-    let (lo, hi) = PackedBoolIter::new(&data).size_hint();
-    assert_eq!((lo, hi), (0, Some(5)));
+fn packed_size_hint_brackets_well_formed_input() {
+    for data in well_formed_packed_bodies() {
+        check_size_hint!(assert_size_hint_brackets, &data);
+    }
+}
+
+#[test]
+fn packed_size_hint_upper_holds_on_malformed_input() {
+    let mut bodies: Vec<Vec<u8>> = malformed_packed_bodies()
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
+    bodies.push(vec![0x80; 10]);
+    bodies.push(vec![0x80; 20]);
+    bodies.push(vec![0x01, 0x02, 0x80]);
+    for data in bodies {
+        check_size_hint!(assert_size_hint_upper_holds, &data);
+    }
+}
+
+/// Pins the documented deviation: the lower bound comes from the byte count
+/// alone, so a malformed run that yields nothing still claims
+/// `remaining / 10` items. A change here must update the "Size hint" section
+/// of the `PackedIter` docs.
+#[test]
+fn packed_size_hint_lower_bound_overclaims_on_malformed_input() {
+    for (len, claimed) in [(9, 0), (10, 1), (20, 2), (29, 2)] {
+        let data = vec![0x80; len];
+        let it = PackedIter::new(&data);
+        assert_eq!(it.size_hint(), (claimed, Some(len)), "{len} bytes");
+        assert_eq!(it.count(), 0, "{len} bytes");
+        assert_eq!(
+            PackedSint64Iter::new(&data).size_hint(),
+            (claimed, Some(len))
+        );
+        assert_eq!(PackedBoolIter::new(&data).size_hint(), (claimed, Some(len)));
+    }
 }
 
 #[test]

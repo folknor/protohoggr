@@ -151,8 +151,6 @@ Reported by: codex/tests, opus/tests, opus/machinery.
 - `int32_field_positive_roundtrip` decodes with `read_varint` (u64) because
   `Cursor` has no int32 reader though it has `read_varint_i64`; the caller-side
   `as i32` path is untested (opus/tests calls this a small API gap).
-- `packed_typed_iter_size_hint` says all wrappers delegate to
-  `PackedIter::size_hint` and checks one 5-byte input.
 - `count_varints_17_bytes` / `count_varints_32_bytes` say they exercise the
   SIMD chunk "on x86-64"; elsewhere the same names run the scalar fallback
   (see VER-014).
@@ -205,8 +203,8 @@ Coverage gaps (opus/tests table, codex/tests):
 Structural cause: the 24 field encoders are 12 pairs where the skip variant
 duplicates the `_always` body instead of calling it, and the six typed packed
 iterators are six copies of the same ~50 lines. `packed_typed_iter_empty`,
-`_remaining_bytes` and `_size_hint` list the six types by hand, so a seventh
-gets no coverage and no warning.
+`_remaining_bytes` and the `check_size_hint` macro list the six types by hand,
+so a seventh gets no coverage and no warning.
 
 Proposed: define skip variants as `if v != default { X_always(..) }` or
 generate pairs with one `macro_rules!`; generate typed iterators as a generic

@@ -476,6 +476,35 @@ const fn sint32_wire_bits(v: u64) -> u32 {
 /// every later call (the iterator is fused). This holds for all the typed
 /// wrappers too. There is no way to tell a decode error from the end of the
 /// data; use [`Cursor::read_varint`] in a loop when errors matter.
+///
+/// # Size hint
+///
+/// `size_hint` returns `(remaining / 10, Some(remaining))` from the byte
+/// count alone, and all the typed wrappers forward it. The upper bound always
+/// holds. The lower bound holds whenever the remaining bytes decode cleanly,
+/// but on malformed input this is a deliberate deviation from the `Iterator`
+/// protocol: a malformed varint ends iteration early, so the iterator can
+/// yield fewer items than the lower bound - up to `remaining / 10` fewer, and
+/// that bound is reached by ten `0x80` bytes, which yield nothing.
+///
+/// The wrong hint does not by itself cause memory unsafety, and consumers
+/// must never rely on `size_hint` for that. Its effect is over-reservation,
+/// which adapters can amplify: `Cycle` turns any positive lower bound into
+/// `usize::MAX`, so collecting a cycled malformed iterator panics with a
+/// capacity overflow, and `take(n)` over that can reserve close to `n`
+/// elements.
+///
+/// It is left this way on purpose. A correct positive lower bound needs
+/// content past the cursor, since a ten-byte overflowing run can sit
+/// anywhere. Every approach weighed for obtaining it - scanning in
+/// `size_hint` (repeated by `Vec::extend` at each growth step, and discarded
+/// by `filter` and `filter_map`), caching a scan in the iterator, validating
+/// at construction, or bookkeeping in `next` - adds work on well-formed data.
+/// A lower bound of 0 makes every `collect` and `extend` regrow from scratch.
+/// Keeping the bound by changing malformed-input behavior would mean
+/// panicking on untrusted input or fabricating values from misaligned bytes.
+/// For an exact count of an untrusted body, count successful
+/// [`Cursor::read_varint`] calls.
 #[derive(Clone)]
 pub struct PackedIter<'a> {
     cursor: Cursor<'a>,
@@ -540,9 +569,10 @@ impl Iterator for PackedIter<'_> {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.cursor.remaining();
-        // Each varint is 1-10 bytes, so:
-        // min elements = remaining / 10 (all 10-byte varints)
-        // max elements = remaining (all 1-byte varints)
+        // Each varint is 1-10 bytes, so a body that decodes cleanly holds at
+        // least remaining / 10 and at most remaining elements. The lower
+        // bound is wrong on malformed input, deliberately: see "Size hint" in
+        // the type docs for why it is not computed from the content.
         (remaining / 10, Some(remaining))
     }
 }
@@ -884,9 +914,13 @@ impl FusedIterator for PackedBoolIter<'_> {}
 /// (bytes with the high bit clear, `b & 0x80 == 0`).
 ///
 /// This counts terminal bytes, not necessarily complete varints. A truncated
-/// final varint (no terminal byte) is simply not counted. This matches the
-/// intended use: counting elements in a length-delimited packed field that
-/// was already validated by the enclosing message framing.
+/// final varint (no terminal byte) is simply not counted. Framing does not
+/// make it exact: it fixes the field's byte extent, not the validity of the
+/// varints inside. An overflowing ten-byte varint (`0x80` nine times, then
+/// `0x02`) counts as 1 here, while the packed iterators yield nothing for it.
+/// The count equals what the iterators yield only for a body whose varints
+/// are known to be well-formed, which makes it a capacity estimate for
+/// untrusted data, not a length.
 #[inline]
 #[must_use]
 pub fn count_packed_varints(data: &[u8]) -> usize {
