@@ -797,34 +797,6 @@ opus/brokkr-config.
 
 ## Lints and suppressions
 
-## VER-027 - `#[allow]` attributes suppress nothing and would hide future casts
-
-`src/lib.rs`: `cast_possible_truncation` on `read_varint_unchecked` and
-`read_varint_unchecked_slow` (no casts); both allows on
-`decode_packed_sint64_cumulative` (no `as` casts); `cast_possible_truncation`
-on `encode_int32_field` / `_always` (`i32 as i64 as u64` widens; only sign-loss
-applies); probably `cast_possible_truncation` on `encode_bytes_field`,
-`_always` and `encode_packed_bool` (`usize as u64`; whether clippy lints that
-direction is unverified). `benches/varint.rs` carries crate-wide
-`#![allow(clippy::unwrap_used, cast_possible_truncation, cast_sign_loss,
-cast_possible_wrap)]` with no `.unwrap()` and only `N as u64`, so all four look
-unused and would hide a real truncating cast added later, for example while
-reworking the `u8` SIMD widths (codex/bench, opus/bench). An unused `#[allow]`
-is silent: a suppression keyed on a lint name keeps suppressing whether or not
-its target remains. AGENTS.md's "use `#[allow(...)]` locally with care" is the
-advice that produces these.
-
-Proposed: replace every `#[allow]` with `#[expect]` (stable since 1.81) and add
-`allow_attributes = "deny"` (optionally `allow_attributes_without_reason`) to
-`[lints.clippy]`; `unfulfilled_lint_expectations` then flags stale ones and
-brokkr fails on it. Fully enforceable by lint. Caveat from opus/brokkr-config:
-with a cross-target clippy lane (VER-014), an expectation that fires on one
-target only needs `cfg_attr`. codex/bench also suggests a syntax rule rejecting
-crate-wide allows of these lints and checked conversions in fixtures.
-
-Reported by: codex/bench, opus/tests, opus/bench, opus/machinery,
-opus/brokkr-config.
-
 ## VER-028 - The clippy deny list is a copied template that misses the lints this crate needs
 
 `[lints.clippy]` includes lints that cannot fire here
@@ -832,7 +804,7 @@ opus/brokkr-config.
 `large_enum_variant`, `clone_on_ref_ptr`), which makes the list read as
 curated while lints the crate does need are absent:
 `undocumented_unsafe_blocks` and `multiple_unsafe_ops_per_block` (VER-013),
-`allow_attributes` (VER-027), `arithmetic_side_effects` on the cursor
+`arithmetic_side_effects` on the cursor
 arithmetic and `indexing_slicing` on the decoder (bounded reads now go
 through `Cursor::take`, but the varint paths and `read_raw_field` still index),
 `missing_debug_implementations` (VER-035).
@@ -845,41 +817,23 @@ opus/bench, opus/brokkr-config.
 
 ## Text checks
 
-## VER-029 - The gremlins check is a denylist, narrower than the rule, and has let corruption through
+## VER-029 - Open question: which characters beyond U+FFFD count as gremlins
 
-AGENTS.md: "Em-dash, en-dash, strange quotes, whatever - they're all
-verboten." brokkr's gremlins check bans named codepoints plus pictograph
-ranges and deliberately spares arrows (`brokkr/src/gremlins.rs`,
-`pictograph_name`). It passes, in tracked files today:
-
-- U+FFFD REPLACEMENT CHARACTER, twice, in the `encode_tag_standalone` comment
-  in `tests/wire.rs` - a mangled arrow, i.e. corruption, not style.
-- U+2212 MINUS SIGN in the `encode_tag` Panics doc ("2^29 - 1").
-- U+00D7 MULTIPLICATION SIGN in the `read_varint` and `encode_varint` docs,
-  CHANGELOG 0.2.0 and the bench doc.
-- U+2026 HORIZONTAL ELLIPSIS in the `zigzag_encode_64` doc.
-- U+2264 LESS-THAN OR EQUAL in the bench doc.
-- U+2192 RIGHTWARDS ARROW in many test comments, `lib.rs` and the bench.
-
-The scanner also accepts a fixed extension list, so extensionless files such
-as `LICENSE`, or a file renamed to an unrecognized extension, are not scanned
-(codex/machinery); opus/machinery says it scans tracked plus
-untracked-not-ignored `.rs`, `.md` and `.toml`; opus/tests could not tell
-whether untracked files are scanned. Separately, an earlier `--fix-gremlins`
-run rewrote the bench doc's check and cross marks to `[x]` and `[ ]`, turning
-"does not fit" into what reads as an unticked checklist item - a silent change
-of meaning (opus/machinery, opus/brokkr-config).
-
-Proposed: an allowlist (ASCII-only for `.rs`, `.toml`, `.md`, with explicit
-per-file exemptions), with U+FFFD a hard error everywhere; classify owned text
-inputs explicitly and report unclassified files instead of exempting them
-(codex/machinery); or narrow AGENTS.md to what the check enforces. brokkr's
-`[gremlins] ban` is scan-only (`--fix-gremlins` has no ASCII mapping for extra
-codepoints), so each hit is fixed by hand once. opus/brokkr-config proposes at
-minimum `ban = ["U+FFFD"]`, extended per intent. opus/tests offers a fallback: a
-short test in `tests/` rejecting any byte >= 0x80 in tracked text files. Open
-intent question: which characters beyond U+FFFD count as "strange" (U+00D7,
-U+2212, U+2026, U+2264/U+2265, arrows)?
+U+FFFD is banned (`[gremlins] ban` in `brokkr.toml`) and the corrupted arrow in
+`tests/wire.rs` is fixed. The rest of the ban list is the user's call. brokkr's
+gremlins check is a denylist that deliberately spares arrows, so AGENTS.md's
+"Em-dash, en-dash, strange quotes, whatever - they're all verboten" is narrower
+in practice than it reads. Still passing, in tracked files: U+2212 MINUS SIGN
+(`encode_tag` Panics doc), U+00D7 MULTIPLICATION SIGN (`read_varint` and
+`encode_varint` docs, CHANGELOG 0.2.0, bench doc), U+2026 HORIZONTAL ELLIPSIS
+(`zigzag_encode_64` doc), U+2264/U+2265 (bench doc), U+2192 RIGHTWARDS ARROW
+(many test comments, `lib.rs`, bench). `[gremlins] ban` is scan-only (no
+`--fix-gremlins` ASCII mapping for extra codepoints), so each hit is fixed by
+hand once. Fallback if a full ASCII rule is wanted: a short test in `tests/`
+rejecting any byte >= 0x80 in tracked text files. Separately, the scanner uses
+a fixed extension list, so extensionless files such as `LICENSE` are not
+scanned. An earlier `--fix-gremlins` run rewrote the bench doc's check and
+cross marks to `[x]` and `[ ]`, a silent change of meaning worth rechecking.
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery,
 opus/brokkr-config.
@@ -1066,62 +1020,6 @@ Reported by: codex/machinery, opus/tests, opus/machinery, opus/brokkr-config.
 
 ## Repository and check machinery
 
-## VER-038 - `.gitignore` entries that say something false or match nothing
-
-- `Cargo.lock` is listed and tracked. The line is a no-op for the tracked
-  file, reads as a "don't commit the lockfile" policy the repo does not follow,
-  contradicts the commit-lockfiles rule, and would silently keep a regenerated
-  lockfile out of `git add -A` after any `git rm --cached`. Agents told to
-  commit lockfiles "unless they're .gitignored" are misled (opus/brokkr-config).
-- `data` matches nothing; inherited from pbfhogg, and a future `data/` of
-  fixtures would be silently ignored.
-- `.plans/` hides `.plans/dynamic-beaming-giraffe.md` from review and gremlins
-  (it has em-dashes); AGENTS.md retires `plans/` in favour of `notes/`, and the
-  plan contradicts `lib.rs` on `read_varint_unchecked` (VER-020) and carries the
-  only justification for the 0.4.0 API (VER-024).
-
-Proposed: delete the `Cargo.lock` and `data` lines; move or delete the plan and
-drop `.plans/`. Enforceable: a script check that no tracked file matches
-`git check-ignore --no-index`, and that every pattern matches a path or is
-allowlisted (opus/machinery).
-
-Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
-opus/brokkr-config.
-
-## VER-039 - `.brokkr/` is written on every run and is not ignored
-
-Each check writes `.brokkr/check-logs/check-<ms>.log` and
-`.brokkr/accounting/<run>/{plan.json, journal.jsonl}` (one run's plan 5,592
-bytes, journal 95,745 bytes; the directory about 804 KiB, per codex/machinery).
-`.brokkr/` shows as untracked in every `git status`; a `git add -A` would
-commit run journals containing absolute paths; once `brokkr bench` runs,
-baselines land in `.brokkr/bench/` too. pbfhogg and elivagar ignore
-`.brokkr/*` and un-ignore `results.db`; brokkr's own docs describe
-`.brokkr/*.db` as ignored (opus/brokkr-config, opus/machinery).
-
-Interactions reported: brokkr's markdown-only shortcut classifies
-untracked-not-ignored paths, so with `.brokkr/` present the tree may always
-classify as code and the shortcut may be dead (opus/brokkr-config, unverified
-whether brokkr excludes its own directory); gremlins and textlint read
-untracked-not-ignored files, and brokkr writes `.toml` files there in other
-configurations.
-
-Retention readings differ: opus/machinery says logs and accounting are each
-kept to the newest 10 (`run_log.rs`, `ACCOUNTING_RUNS_KEPT`); opus/bench could
-not see retention for `accounting/`; codex/machinery says both retention paths
-discard removal errors, so failed cleanup can silently defeat the bound.
-
-Proposed: add `.brokkr/` (or the sibling `.brokkr/*` pattern) to
-`.gitignore`; whether bench baselines should be kept durably is a policy
-decision (`brokkr man bench` says they are not reconstructible). brokkr-side:
-write a self-ignoring `.brokkr/.gitignore`, warn when its state root is not
-ignored, report pruning failures. Enforceable by a script check
-(`git check-ignore -q .brokkr && echo brokkr-state-ignored`, which fails closed
-if the line is removed) or a brokkr preflight.
-
-Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
-opus/brokkr-config.
-
 ## VER-040 - The default check sweep is labelled `all-features` for a crate with no features
 
 With no `[[check]]` entry brokkr synthesizes one sweep named `all-features`
@@ -1200,8 +1098,7 @@ is compiled into the crate is also treated as prose.
 
 Proposed: key reuse on a successful result for the source inputs, toolchain,
 dependencies and build shape, or report a prose-only result without implying
-full verification; enforced by a scenario test. See also VER-039 on whether the
-shortcut fires here at all.
+full verification; enforced by a scenario test.
 
 Reported by: codex/machinery.
 

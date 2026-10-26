@@ -19,13 +19,6 @@
 //!   So for sint64 values that happen to fit in u32 (most OSM deltas), the best batch
 //!   decode is `decode_two<u32>`; for tiny deltas (≤u16), `decode_four<u16>` is available.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap
-)]
-
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use protohoggr::{PackedSint64Iter, encode_packed_sint64, zigzag_decode_64, zigzag_encode_64};
 use std::hint::black_box;

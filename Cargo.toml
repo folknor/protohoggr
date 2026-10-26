@@ -12,6 +12,7 @@ keywords = ["protobuf", "varint", "wire-format", "encoding", "decoding"]
 categories = ["encoding", "parser-implementations"]
 
 [lints.clippy]
+allow_attributes = "deny"
 uninlined_format_args = "deny"
 cloned_instead_of_copied = "deny"
 redundant_closure_for_method_calls = "deny"

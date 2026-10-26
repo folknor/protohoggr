@@ -217,7 +217,6 @@ impl<'a> Cursor<'a> {
     /// Violating condition 1 causes an out-of-bounds read (UB). Violating
     /// condition 2 produces an unspecified value (not UB, but meaningless).
     #[inline]
-    #[allow(clippy::cast_possible_truncation)]
     pub unsafe fn read_varint_unchecked(&mut self) -> u64 {
         // SAFETY: caller guarantees a valid varint at pos.
         let b = unsafe { *self.data.get_unchecked(self.pos) };
@@ -230,7 +229,6 @@ impl<'a> Cursor<'a> {
     }
 
     #[cold]
-    #[allow(clippy::cast_possible_truncation)]
     unsafe fn read_varint_unchecked_slow(&mut self, mut val: u64) -> u64 {
         let mut shift: u32 = 7;
         loop {
@@ -257,14 +255,14 @@ impl<'a> Cursor<'a> {
         if v > u64::from(u32::MAX) {
             return Err(wire_error("varint overflows u32"));
         }
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         Ok(v as u32)
     }
 
     /// Read a varint and reinterpret as `i64`.
     #[inline]
     pub fn read_varint_i64(&mut self) -> WireResult<i64> {
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(clippy::cast_possible_wrap)]
         Ok(self.read_varint()? as i64)
     }
 
@@ -428,9 +426,9 @@ impl<'a> Cursor<'a> {
 #[inline]
 #[must_use]
 pub fn zigzag_decode_64(v: u64) -> i64 {
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     let signed = (v >> 1) as i64;
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     let sign = -((v & 1) as i64);
     signed ^ sign
 }
@@ -445,9 +443,9 @@ pub fn zigzag_decode_64(v: u64) -> i64 {
 #[inline]
 #[must_use]
 pub fn zigzag_decode_32(v32: u32) -> i32 {
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     let signed = (v32 >> 1) as i32;
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     let sign = -((v32 & 1) as i32);
     signed ^ sign
 }
@@ -461,7 +459,7 @@ pub fn zigzag_decode_32(v32: u32) -> i32 {
 /// `sint32` encoders sign-extended zigzag values with bit 31 set into 10-byte
 /// varints.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
+#[expect(clippy::cast_possible_truncation)]
 const fn sint32_wire_bits(v: u64) -> u32 {
     v as u32
 }
@@ -723,7 +721,7 @@ impl Iterator for PackedInt64Iter<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<i64> {
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(clippy::cast_possible_wrap)]
         self.0.next().map(|v| v as i64)
     }
 
@@ -779,7 +777,7 @@ impl Iterator for PackedInt32Iter<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<i32> {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        #[expect(clippy::cast_possible_truncation)]
         self.0.next().map(|v| v as i32)
     }
 
@@ -835,7 +833,7 @@ impl Iterator for PackedUint32Iter<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<u32> {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         self.0.next().map(|v| v as u32)
     }
 
@@ -965,7 +963,7 @@ unsafe fn count_packed_varints_sse2(data: &[u8]) -> usize {
         let chunk = unsafe { _mm_loadu_si128(ptr.add(i).cast()) };
         // movemask extracts the high bit of each byte into a 16-bit mask.
         // Terminals have high bit = 0, so we invert and popcount.
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(clippy::cast_sign_loss)]
         let mask = _mm_movemask_epi8(chunk) as u32;
         count += (!mask & 0xFFFF).count_ones() as usize;
         i += 16;
@@ -995,7 +993,6 @@ unsafe fn count_packed_varints_sse2(data: &[u8]) -> usize {
 /// wire data, not a strict validator.
 ///
 /// Accumulation uses wrapping `i64` addition - no overflow checks.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64>) {
     let count = count_packed_varints(data);
     if count == 0 {
@@ -1066,7 +1063,7 @@ pub fn decode_packed_sint64_cumulative(data: &[u8], base: i64, out: &mut Vec<i64
 /// 3.5× faster for 1-byte varints and 1.5× faster for 3-byte varints.
 /// See `notes/SIMD.md` in pbfhogg (dd7f69a) (P3-20, closed).
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
+#[expect(clippy::cast_possible_truncation)]
 pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         buf.push((value as u8) | 0x80);
@@ -1085,7 +1082,7 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 ///
 /// Caller must ensure `buf.len() >= 10`.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
+#[expect(clippy::cast_possible_truncation)]
 pub unsafe fn encode_varint_to_slice(buf: &mut [u8], value: u64) -> usize {
     // 1-byte fast path: value < 128
     if value < 0x80 {
@@ -1121,7 +1118,7 @@ pub unsafe fn encode_varint_to_slice(buf: &mut [u8], value: u64) -> usize {
 /// Maps: 0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, …
 #[inline]
 #[must_use]
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn zigzag_encode_64(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
 }
@@ -1135,7 +1132,7 @@ pub fn zigzag_encode_64(v: i64) -> u64 {
 /// set into a 10-byte varint.
 #[inline]
 #[must_use]
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn zigzag_encode_32(v: i32) -> u32 {
     ((v << 1) ^ (v >> 31)) as u32
 }
@@ -1180,7 +1177,7 @@ pub fn encode_varint_field_always(buf: &mut Vec<u8>, field: u32, value: u64) {
 ///
 /// Negative `i64` values encode as 10-byte varints (sign-extension).
 #[inline]
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn encode_int64_field(buf: &mut Vec<u8>, field: u32, value: i64) {
     if value != 0 {
         encode_tag(buf, field, WIRE_VARINT);
@@ -1190,7 +1187,7 @@ pub fn encode_int64_field(buf: &mut Vec<u8>, field: u32, value: i64) {
 
 /// Encode an `int64` field unconditionally (even if zero).
 #[inline]
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn encode_int64_field_always(buf: &mut Vec<u8>, field: u32, value: i64) {
     encode_tag(buf, field, WIRE_VARINT);
     encode_varint(buf, value as u64);
@@ -1201,7 +1198,7 @@ pub fn encode_int64_field_always(buf: &mut Vec<u8>, field: u32, value: i64) {
 /// Negative `i32` sign-extends to `i64` before varint encoding,
 /// producing 10-byte varints.
 #[inline]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn encode_int32_field(buf: &mut Vec<u8>, field: u32, value: i32) {
     if value != 0 {
         encode_tag(buf, field, WIRE_VARINT);
@@ -1211,7 +1208,7 @@ pub fn encode_int32_field(buf: &mut Vec<u8>, field: u32, value: i32) {
 
 /// Encode an `int32` field unconditionally (even if zero).
 #[inline]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn encode_int32_field_always(buf: &mut Vec<u8>, field: u32, value: i32) {
     encode_tag(buf, field, WIRE_VARINT);
     encode_varint(buf, value as i64 as u64);
@@ -1253,7 +1250,6 @@ pub fn encode_bool_field_always(buf: &mut Vec<u8>, field: u32, value: bool) {
 ///
 /// Skips if `data` is empty.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 pub fn encode_bytes_field(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
     if !data.is_empty() {
         encode_tag(buf, field, WIRE_LEN);
@@ -1264,7 +1260,6 @@ pub fn encode_bytes_field(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
 
 /// Encode a length-delimited field unconditionally (even if empty).
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 pub fn encode_bytes_field_always(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
     encode_tag(buf, field, WIRE_LEN);
     encode_varint(buf, data.len() as u64);
@@ -1388,7 +1383,7 @@ pub fn encode_packed_uint32(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32
 }
 
 /// Encode a packed repeated `int32` field.
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 pub fn encode_packed_int32(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32, values: &[i32]) {
     if values.is_empty() {
         return;
@@ -1428,7 +1423,6 @@ pub fn encode_packed_sint32(buf: &mut Vec<u8>, scratch: &mut Vec<u8>, field: u32
 ///
 /// Bools are always exactly 1 byte on the wire, so this skips the scratch
 /// buffer and writes directly - length is just `values.len()`.
-#[allow(clippy::cast_possible_truncation)]
 pub fn encode_packed_bool(buf: &mut Vec<u8>, field: u32, values: &[bool]) {
     if values.is_empty() {
         return;

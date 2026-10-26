@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, missing_docs)]
+#![expect(clippy::unwrap_used, missing_docs)]
 
 use protohoggr::*;
 
@@ -967,7 +967,7 @@ fn encode_tag_standalone() {
     assert_eq!(buf, [0x08]);
 
     buf.clear();
-    // field 1, WIRE_LEN �� (1 << 3) | 2 = 0x0A
+    // field 1, WIRE_LEN = (1 << 3) | 2 = 0x0A
     encode_tag(&mut buf, 1, WIRE_LEN);
     assert_eq!(buf, [0x0A]);
 
@@ -1446,7 +1446,7 @@ fn read_fixed64_truncated() {
 }
 
 #[test]
-#[allow(clippy::approx_constant)]
+#[expect(clippy::approx_constant)]
 fn read_float() {
     let val: f32 = 3.14;
     let data = val.to_le_bytes();
@@ -1456,7 +1456,7 @@ fn read_float() {
 }
 
 #[test]
-#[allow(clippy::approx_constant)]
+#[expect(clippy::approx_constant)]
 fn read_double() {
     let val: f64 = 2.718281828;
     let data = val.to_le_bytes();
@@ -1639,7 +1639,7 @@ fn float_field_skip_zero() {
 
 #[test]
 fn float_field_encode_decode_roundtrip() {
-    #[allow(clippy::approx_constant)]
+    #[expect(clippy::approx_constant)]
     for value in [0.0f32, 1.0, -1.0, 3.14, f32::MAX, f32::MIN] {
         let mut buf = Vec::new();
         encode_float_field_always(&mut buf, 4, value);
@@ -1667,7 +1667,7 @@ fn double_field_skip_zero() {
 
 #[test]
 fn double_field_encode_decode_roundtrip() {
-    #[allow(clippy::approx_constant)]
+    #[expect(clippy::approx_constant)]
     for value in [0.0f64, 1.0, -1.0, 2.718281828, f64::MAX, f64::MIN] {
         let mut buf = Vec::new();
         encode_double_field_always(&mut buf, 5, value);

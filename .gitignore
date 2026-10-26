@@ -1,7 +1,5 @@
 target
-Cargo.lock
+.brokkr/
 .*.swp
 .*.swo
 .idea
-.plans/
-data

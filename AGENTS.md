@@ -25,7 +25,7 @@ brokkr fmt         # format
 - No external dependencies - pure Rust, std only
 - Very strict clippy: 30+ lints set to `deny` in `Cargo.toml` under `[lints.clippy]`
   - `unwrap_used` is denied - enforced via `Cargo.toml`
-  - `cast_sign_loss`, `cast_possible_truncation`, `cast_possible_wrap` are denied - use `#[allow(...)]` locally with care
+  - `cast_sign_loss`, `cast_possible_truncation`, `cast_possible_wrap` are denied - use `#[expect(...)]` locally with care (`allow_attributes` is denied, and a stale expectation fails the build)
   - `cognitive_complexity` and `too_many_lines` are denied - keep functions small
 - Test module uses `#[allow(clippy::unwrap_used)]` so `.unwrap()` is fine in tests
 - Use `WireResult<T>` / `WireError` for fallible operations, not panics

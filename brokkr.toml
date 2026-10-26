@@ -1,1 +1,4 @@
 project = "protohoggr"
+
+[gremlins]
+ban = ["U+FFFD"]
