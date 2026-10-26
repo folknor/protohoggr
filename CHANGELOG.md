@@ -7,6 +7,7 @@
 
 ### Breaking
 - `zigzag_encode_32` now returns `u32` and `zigzag_decode_32` now takes `u32`, making the pair a pure 32-bit bijection. Widen encoder output with `u64::from`; narrow a raw varint with `as u32` before decoding. `Cursor::read_sint32` and `PackedSint32Iter` do this truncation themselves, per protobuf's rule that a `sint32` varint is truncated to 32 bits before zigzag decoding
+- Minimum supported Rust version raised from 1.85 to 1.87, the release that made `core::arch` intrinsics safe to call where their target feature is enabled
 
 ## 0.4.0
 

@@ -462,9 +462,9 @@ through `cc`, so the test suite of this pure-std crate needs a C compiler.
 30 ms); the cost is paid on every cold build (fresh clone, `cargo clean`,
 toolchain bump, lockfile update, any rustflags change). The cold cost was not
 measured by any hunter. Every lockfile diff in the repo is in practice bench
-churn (opus/bench). Downstream effects filed elsewhere: the declared MSRV
-(VER-019), the SSSE3 requirement (VER-017), cross-target Miri (VER-013), and
-the "no external dependencies" claim (VER-033).
+churn (opus/bench). Downstream effects filed elsewhere: the SSSE3 requirement
+(VER-017), cross-target Miri (VER-013), and the "no external dependencies"
+claim (VER-033).
 
 Proposed, by order of payoff (opus/tests): delete the varint-simd comparison
 (the research is closed, per the doc comments' "P3-20, closed"); move the
@@ -546,7 +546,7 @@ project config file.
 Reported by: opus/tests, opus/machinery; codex/bench notes the
 `-Ctarget-cpu=native` dependency.
 
-## VER-019 - The toolchain is unpinned, and `rust-version = "1.85"` is never checked
+## VER-019 - The toolchain is unpinned, and `rust-version` is never checked
 
 - AGENTS.md says "nightly toolchain"; no `rust-toolchain.toml` exists, so
   nightly comes from the rustup default
@@ -558,30 +558,19 @@ Reported by: opus/tests, opus/machinery; codex/bench notes the
   --format json`), the rustdoc phase picks `--check` only on nightly, and Miri
   is nightly-only, so a stable-default host degrades three ways
   (opus/brokkr-config).
-- `rust-version = "1.85"` is published to crates.io and checked by nothing.
-  criterion 0.8.2 declares 1.86, so `cargo +1.85 test` cannot build (the
-  library alone may still build; codex/machinery and opus/bench).
-  `count_packed_varints_sse2` calls `_mm_movemask_epi8` outside an `unsafe`
-  block; before the intrinsic became safe in a matching `target_feature`
-  context (believed 1.87) this raises `unsafe_op_in_unsafe_fn`, which brokkr
-  would fail on - unverified, no 1.85 toolchain is installed (opus/tests,
-  opus/bench, opus/machinery). Several `[lints.clippy]` names (for example
-  `regex_creation_in_loops`) are newer than 1.85's clippy and would be
-  `unknown_lints` warnings there (opus/machinery).
-- Readings differ on how much is already held: opus/brokkr-config says
-  clippy's default-warn `incompatible_msrv` reads `rust-version` and, under
-  brokkr, fails on std APIs stabilized after it, so API drift is caught and
-  only language-feature drift is not; opus/machinery says `incompatible_msrv`
-  checks stabilized std APIs, not lint behaviour, so it misses the
-  `_mm_movemask_epi8` case.
+- `rust-version` is published to crates.io and checked by nothing: the check
+  builds only on the host nightly, never on the declared minimum.
+  opus/brokkr-config notes clippy's default-warn `incompatible_msrv` reads `rust-version` and,
+  under brokkr, fails on std APIs stabilized after it, so API drift is caught;
+  language-feature drift and lint-behaviour differences between the minimum
+  and the host nightly are not (opus/machinery).
 
-Proposed: decide what the MSRV is for; if downstream is nightly-only, raise it
-(1.87+ removes the SSE2 `unsafe`, see VER-034) or drop it; pin a dated nightly
-in `rust-toolchain.toml`; an MSRV lane (`cargo +<msrv> check --lib`) with host
-rustflags neutralized. Separate the promises: library on its minimum compiler,
-dev machinery on a specified nightly, and record compiler and brokkr identities
-in results (codex/machinery). Open intent questions: is 1.85 a promise to
-consumers or vestigial? Should the toolchain be pinned?
+Proposed: pin a dated nightly in `rust-toolchain.toml`; an MSRV lane
+(`cargo +<msrv> check --lib`) with host rustflags neutralized, which needs the
+minimum toolchain installed. Separate the promises: library on its minimum
+compiler, dev machinery on a specified nightly, and record compiler and brokkr
+identities in results (codex/machinery). Open intent question: should the
+toolchain be pinned?
 
 Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
 opus/brokkr-config.
@@ -981,7 +970,8 @@ SSE2 is baseline on x86_64, so `#[target_feature(enable = "sse2")]` adds
 nothing; on Rust 1.87+ `_mm_movemask_epi8` is safe in that context, leaving one
 raw-pointer load whose safety follows from `chunks_exact(16)`. The function
 could be safe, removing the `unsafe` call site in `count_packed_varints`; the
-current MSRV is what keeps it (opus/tests, opus/machinery). The `use
+declared MSRV (1.87) no longer stands in the way (opus/tests, opus/machinery).
+The `use
 core::arch::x86_64::...` inside repeats the function's own
 `#[cfg(target_arch = "x86_64")]` (opus/tests, opus/bench, opus/brokkr-config;
 cosmetic). codex/machinery confirms the SSE2 safety justification and load
