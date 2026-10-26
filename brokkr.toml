@@ -2,3 +2,12 @@ project = "protohoggr"
 
 [gremlins]
 ban = ["U+FFFD"]
+
+# "No external dependencies" (README, AGENTS.md, crate doc): an empty allow
+# list fails closed for every kind - normal, build and dev - so the claim holds
+# for contributors as well as consumers. Bench dependencies belong in bench/.
+[[dependency_rule]]
+name = "no-external-dependencies"
+from = "protohoggr"
+allow = []
+

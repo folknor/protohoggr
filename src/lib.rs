@@ -1,8 +1,8 @@
 //! Zero-copy protobuf wire-format primitives.
 //!
 //! Provides varint encoding/decoding, zigzag encoding/decoding, a cursor-based
-//! decoder, field-level encoders, and packed repeated field helpers. No external
-//! dependencies - pure Rust, no std beyond default.
+//! decoder, field-level encoders, and packed repeated field helpers. Pure Rust,
+//! std only: no external crate dependencies of any kind, dev included.
 
 use std::fmt;
 use std::iter::FusedIterator;

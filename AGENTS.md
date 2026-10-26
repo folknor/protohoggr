@@ -9,6 +9,13 @@ This crate is optimized for **speed on well-formed protobuf data**, not for adve
 
 Single-library crate. Implementation in `src/lib.rs`, integration tests in `tests/wire.rs`.
 
+Benchmarks live in `bench/`, a separate unpublished workspace member
+(`protohoggr-bench`) that owns criterion and varint-simd, so the library's own
+check never compiles them. `default-members` keeps `brokkr check` on the
+library alone; lint the bench explicitly with `brokkr clippy -p protohoggr-bench`
+and run it with `brokkr bench varint`. The varint-simd batch comparisons need
+SSSE3 and are left out (with a stderr notice) on builds without it.
+
 ## Build & test
 
 Use `brokkr` (not raw `cargo`).
@@ -22,8 +29,8 @@ brokkr fmt         # format
 ## Code conventions
 
 - Rust 2024 edition, nightly toolchain
-- No external dependencies - pure Rust, std only
-- Very strict clippy: 30+ lints set to `deny` in `Cargo.toml` under `[lints.clippy]`
+- No external dependencies of any kind, dev included - pure Rust, std only. Enforced by the `no-external-dependencies` rule in `brokkr.toml`; anything a bench needs goes in `bench/Cargo.toml`
+- Very strict clippy: 30+ lints set to `deny` in `Cargo.toml` under `[workspace.lints.clippy]`, inherited by both packages
   - `unwrap_used` is denied - enforced via `Cargo.toml`
   - `cast_sign_loss`, `cast_possible_truncation`, `cast_possible_wrap` are denied - use `#[expect(...)]` locally with care (`allow_attributes` is denied, and a stale expectation fails the build)
   - `cognitive_complexity` and `too_many_lines` are denied - keep functions small

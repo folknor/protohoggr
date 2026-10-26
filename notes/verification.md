@@ -342,9 +342,9 @@ diagnostics = "rustc"
 
 Notes from opus/brokkr-config: cost unmeasured (sysroot per target on first
 run); background checks are joined before tests are listed, so Miri wall time
-adds to every check; `cargo miri test --tests` builds every dev-dependency for
-the target and whether varint-simd builds for `i686`/`s390x` is unknown
-(VER-016 removes the risk); Miri runs outside brokkr's execution accounting;
+adds to every check; the library has no dev-dependencies (the bench is its own
+workspace member), so `cargo miri test --tests` builds nothing external;
+Miri runs outside brokkr's execution accounting;
 brokkr has no `when = "gate"` key for `[[script_check]]`, so an expensive check
 cannot be confined to the gate without also dropping cheap ones, and script
 checks run under the markdown-only shortcut. opus/tests proposes a narrower
@@ -369,9 +369,10 @@ tests (17 and 32 bytes) do not cover a mixed continuation-byte tail after a
 vector chunk or offset subslices (codex/tests). README advertises a "scalar
 fallback elsewhere" that has never been built (opus/brokkr-config). Integration
 tests reach only the public API, so they cannot select an implementation. This
-is the "production value with no injection point" shape. The bench's
-x86-only dev-dependency also blocks the one platform where the fallback is
-live (opus/bench).
+is the "production value with no injection point" shape. The library itself
+lints clean for `aarch64-unknown-linux-musl` (checked by hand, not a lane); the
+bench package does not build there without a cross C compiler, which
+criterion's `alloca` needs.
 
 Proposed: compile the scalar version unconditionally as a private function,
 keep the dispatcher, and add a differential unit test asserting
@@ -410,8 +411,7 @@ in the unsafe paths.
 
 A second, related divergence: `brokkr test NAME` defaults to release while
 `brokkr check` runs dev, and AGENTS.md documents both side by side. The first
-focused run after a check rebuilds protohoggr and the whole dev-dependency tree
-in release, and tests an artifact other than the one the check produced
+focused run after a check rebuilds protohoggr in release, and tests an artifact other than the one the check produced
 (opus/bench, opus/brokkr-config).
 
 The two hunters that proposed config differ:
@@ -446,79 +446,11 @@ opus/brokkr-config also notes this makes `brokkr check --gate` work (today a
 load-time error because no gate profile exists), and under
 `certifies = "complete"` an unreferenced `[[check]]` entry is a load error, so
 the release sweep cannot be quietly dropped. Cost: a release clippy and a
-release build of the test graph including every dev-dependency (cold: tens of
-seconds once; warm: a few hundred ms, estimated). opus/machinery alternatively
+release build of the test graph (the library has no dependencies, so cold cost
+is the crate alone; warm: a few hundred ms, estimated). opus/machinery alternatively
 suggests a lane with `-C overflow-checks=off -C debug-assertions=off`.
 
 Reported by: opus/tests, opus/machinery, opus/bench, opus/brokkr-config.
-
-## VER-016 - Bench-only dev-dependencies are built into every test and clippy run of the library
-
-`[dev-dependencies]` holds `criterion` (with `html_reports`; default features
-pull rayon and plotters) and `varint-simd`. Cargo builds dev-dependencies for
-every test target, so `tests/wire.rs`, which uses neither, pays for them:
-`Cargo.lock` has 78 packages, 77 of them from these two; `target/debug/build/`
-has 57 entries, none protohoggr's; and `alloca` (via criterion 0.8) compiles C
-through `cc`, so the test suite of this pure-std crate needs a C compiler.
-`clippy --all-targets` also type-checks the bench. Warm runs hide it (about
-30 ms); the cost is paid on every cold build (fresh clone, `cargo clean`,
-toolchain bump, lockfile update, any rustflags change). The cold cost was not
-measured by any hunter. Every lockfile diff in the repo is in practice bench
-churn (opus/bench). Downstream effects filed elsewhere: the SSSE3 requirement
-(VER-017), cross-target Miri (VER-013), and the "no external dependencies"
-claim (VER-033).
-
-Proposed, by order of payoff (opus/tests): delete the varint-simd comparison
-(the research is closed, per the doc comments' "P3-20, closed"); move the
-remaining bench into a `publish = false` workspace member (for example
-`bench/`) with its own dependencies, checked in a separate explicit lane; or
-use `#![feature(test)]` benches on nightly. Interim: `criterion` with
-`default-features = false, features = ["cargo_bench_support"]` (opus/bench), or
-at least drop `html_reports` (opus/machinery). `brokkr deps` would flag the two
-`syn` majors, both bench-only (opus/bench).
-
-Enforceable by a dependency rule once the bench moves. opus/brokkr-config
-proposes, as an interim dev boundary:
-
-```toml
-[[dependency_rule]]
-name = "dev-dependencies-are-bench-only"
-from = "protohoggr"
-allow = ["criterion", "varint-simd"]
-kinds = ["dev"]
-```
-
-tightened to `allow = []` after the move.
-
-Reported by: codex/tests, codex/bench, codex/machinery, opus/tests, opus/bench,
-opus/machinery, opus/brokkr-config.
-
-## VER-017 - The check only compiles because the host enables SSSE3
-
-`varint-simd` 0.4.1 exposes `decode_two_unsafe` / `decode_four_unsafe` only
-under `cfg(target_feature = "ssse3")` (`cfg(any(..., doc))`), and the bench
-calls them unconditionally. Baseline x86_64 has no SSSE3, so the bench - and
-therefore `brokkr check`'s `clippy --all-targets` - compiles only because
-`~/.cargo/config.toml` sets `-Ctarget-cpu=native`. On a default host or CI
-image clippy fails with an unresolved-function error (a refusal, not a silent
-degradation, per opus/machinery). On aarch64 varint-simd's x86 API is absent;
-whether the library itself builds there was not verified (opus/bench).
-codex/bench: the dependency has no portable architecture fallback.
-`-Ctarget-cpu=native` also turns on AVX2 here, which switches varint-simd's
-`u64` paths (`num.rs`), so `simd_single` and the encode side run AVX2 code
-under labels that say SSSE3/SSE2 (opus/bench). Latent: varint-simd's
-`build.rs` runs `cpuid` when `native-optimizations` is on (it is not), which
-would make behaviour depend on the build host's CPU outside the rustflags
-digest `brokkr bench` records (opus/bench).
-
-Proposed: isolate the comparison in its own package (VER-016) with explicit
-build requirements; gate the SIMD half on `cfg(target_feature = "ssse3")` with
-a `compile_error!` or a skipped group that says so; or declare rustflags for
-the bench crate in a repo-local `.cargo/config.toml`. Enforceable by a
-baseline-x86_64 sweep (brokkr supports `rustflags-*` sweeps) and a non-x86
-check.
-
-Reported by: codex/bench, opus/bench, opus/machinery.
 
 ## VER-018 - The check builds and tests a host-tuned artifact under a user-global cargo config
 
@@ -691,8 +623,10 @@ zigzag-encoded OSM way-ref deltas"). Reported problems:
   and nothing re-measured since, so they come from the bench the project calls
   biased (opus/bench). The 0.3.0 CHANGELOG entry does not say the 0.2.0 numbers
   were measured under that bias.
-- The ISA labels (SSSE3, SSE2) do not describe what runs under
-  `-Ctarget-cpu=native` (VER-017).
+- The ISA labels (SSSE3, SSE2) in the doc comments do not describe what runs
+  under `-Ctarget-cpu=native`, which turns on AVX2 and switches varint-simd's
+  `u64` paths. The bench IDs now carry the build's level suffix; the doc
+  comments still do not.
 - "tied for 3-byte" is the 2.6-byte mixed set (VER-023); the encode ratios
   compare unequal work (VER-022); the decode bench measures iterator traversal
   plus zigzag, not an isolated `read_varint` (codex/bench); "6x" is against
@@ -760,7 +694,7 @@ opus/machinery, opus/brokkr-config.
 
 ## VER-026 - The bench header sends readers to raw `cargo bench` and cargo's scratch directory
 
-`benches/varint.rs` says "Run with: cargo bench --bench varint", against
+The bench header said "Run with: cargo bench --bench varint", against
 AGENTS.md's "never run raw `cargo`". Raw `cargo bench` writes criterion data
 (and, with `html_reports`, an HTML tree) to `target/criterion/` under the
 rolling name `base`: each run overwrites the last and `cargo clean` /
@@ -770,9 +704,12 @@ tools. `brokkr bench varint` sets `CRITERION_HOME` to `.brokkr/bench/`, which
 brokkr owns and its clean spares, with commit-named baselines, an environment
 stamp and refusal of cross-environment comparison.
 
-Proposed: document `brokkr bench varint`; drop `html_reports`; set the report
-backend explicitly if reproducible reports matter. Enforceable by text rule;
-proposed by opus/brokkr-config:
+Partly addressed by moving the bench into its own package `bench/`: the header now
+says `brokkr bench varint`, and criterion is built with
+`default-features = false, features = ["cargo_bench_support"]`, so there is
+no `html_reports` and no Plotters backend (Gnuplot is still picked up if
+installed). Remaining: nothing enforces it. Enforceable by text rule; proposed
+by opus/brokkr-config (bench path now `bench/benches/**/*.rs`):
 
 ```toml
 [[textlint]]
@@ -891,35 +828,6 @@ check (codex/tests).
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/brokkr-config.
 
-## VER-033 - "No external dependencies" is enforced by nothing, and is true only for consumers
-
-Stated in README, AGENTS.md, the `src/lib.rs` crate doc and CHANGELOG 0.2.0.
-True for `[dependencies]` today; nothing would notice a dependency being added.
-The test build pulls 78 packages and needs a C compiler (VER-016), so it is
-false for contributors (opus/bench). The crate doc's second half, "no std
-beyond default", has no checkable meaning: the crate uses `std::fmt`,
-`std::error::Error` and `Vec`; if no-std plus `alloc` is the intent,
-`#![no_std]` + `extern crate alloc` makes the compiler enforce it
-(`core::error::Error` stable since 1.81), otherwise drop the phrase
-(opus/machinery).
-
-Proposed by opus/brokkr-config (an allow list fails closed):
-
-```toml
-[[dependency_rule]]
-name = "no-external-dependencies"
-from = "protohoggr"
-allow = []
-kinds = ["normal", "build"]
-```
-
-Alternatively a test parsing `Cargo.toml` via `env!("CARGO_MANIFEST_DIR")`
-(opus/machinery). After the bench moves (VER-016), tightening to all kinds
-makes the claim true for contributors too.
-
-Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
-opus/brokkr-config.
-
 ## VER-034 - `count_packed_varints_sse2` carries `unsafe`, `target_feature` and a cfg it does not need
 
 SSE2 is baseline on x86_64, so `#[target_feature(enable = "sse2")]` adds
@@ -1036,110 +944,28 @@ opus/brokkr-config also lists, as free: `[manifest] sort_dependencies = true`.
 
 Reported by: opus/tests, opus/brokkr-config.
 
-## VER-041 - Unconfigured convention phases report `started` and nothing else
+## VER-042 - The lib unit-test harness is empty but built and run every check
 
-`header`, `textlint`, `manifest`, `script_check`, `dependency_rules` and
-`rustdoc` print `phase X: started` on every check and do nothing, because they
-are unconfigured; only `member_check` and `fixture_lint` say "not applicable".
-A log reader infers they checked something; the README's dependency claim, for
-example, looks held when it is not. The consolidated line `gremlins (11 files),
-publish cycle: ok` is the only honest statement of coverage.
+The lib unit harness has 0 tests (no `#[cfg(test)]` in `src/`) and is built,
+linked and spawned every run. Proposed: use it rather than disable it - the
+differential tests in VER-007 and VER-014 and tests of private items
+(`sint32_wire_bits`, `read_varint_slow`'s branches) need a `#[cfg(test)]`
+module (opus/tests, opus/machinery); otherwise `[lib] test = false`.
 
-Proposed (brokkr-side): print "not configured" for inert phases. Enforceable by
-brokkr's own tests.
-
-Reported by: opus/bench, opus/machinery.
-
-## VER-042 - Each check enters cargo three times for tests and runs an empty harness
-
-Per run: `cargo test --no-run ... --tests` in prepare, the same again in the
-test phase, then `cargo test ... --tests -- --test-threads=1`. Three cargo
-startups and fingerprint walks (about 30 ms each warm), not three
-compilations; prepare took 364 ms in one run and 415 ms in another
-(codex/machinery). The lib unit harness has 0 tests (no `#[cfg(test)]` in
-`src/`) and is built, linked and spawned every run.
-
-Readings differ on the serial run: codex/tests and codex/machinery see no reason
-for serial scheduling but say to measure before choosing a thread policy;
-opus/tests and opus/machinery say serial costs nothing measurable here and the
-suite would be sound in parallel or merged.
-
-Proposed: brokkr-side, prepare once and execute the inventoried artifacts
-directly (brokkr already does this for other lanes), enforced by an
-orchestration test counting build invocations (codex/machinery). For the
-empty harness: use it rather than disable it - the differential tests in
-VER-007 and VER-014 and tests of private items (`sint32_wire_bits`,
-`read_varint_slow`'s branches) need a `#[cfg(test)]` module (opus/tests,
-opus/machinery); otherwise `[lib] test = false`. brokkr could warn on a harness
-that always reports zero tests.
+The brokkr-side parts of this finding (three cargo invocations per check, a
+dead-harness warning) are tracked in brokkr's bz tracker. Readings differ on
+the serial `--test-threads=1` run: codex/tests and codex/machinery say measure
+before choosing a thread policy; opus/tests and opus/machinery say serial costs
+nothing measurable here.
 
 Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery.
-
-## VER-043 - brokkr's test runner polls for child exit every 250 ms
-
-`wait_child` (`brokkr/src/test_runner/run.rs`) polls process completion at a
-250 ms interval, and its watchdog sleeps and is joined during shutdown without
-an immediate wakeup. Retained test phases take 306-307 ms consistently,
-including one reporting 30 ms to build binaries, consistent with polling
-dominating; the logs do not isolate it.
-
-Proposed: child-exit notification and a wakeable watchdog with timed waits for
-deadlines; enforced by runner tests showing completion wakes the waiter.
-
-Reported by: codex/machinery.
-
-## VER-044 - brokkr's markdown-only shortcut trusts git dirt, not a recorded successful run
-
-`brokkr/src/scope.rs` skips Rust phases when the only uncommitted changes are
-Markdown, justified by "the last full run already checked the same code", but
-classification consults git dirt rather than a success record. Checking out an
-unchecked commit and editing README skips compilation and tests. Markdown that
-is compiled into the crate is also treated as prose.
-
-Proposed: key reuse on a successful result for the source inputs, toolchain,
-dependencies and build shape, or report a prose-only result without implying
-full verification; enforced by a scenario test.
-
-Reported by: codex/machinery.
-
-## VER-045 - `brokkr check` needs more host than the library does, and its lock is global
-
-- Gremlins enumerates with `git ls-files` and refuses outside a git
-  repository; the serial harness uses Linux `/proc`, Unix sockets, peer
-  credentials and pidfds, with a socket directory under a writable `$HOME`
-  (long home paths can exceed the socket path limit). A portable library's
-  standard verifier therefore needs a Linux development host. Proposed:
-  separate portable crate verification from optional Linux supervision, with
-  explicit state paths and capability probes before building.
-- The lock lives under `$HOME/.brokkr` and is described as global, so a check
-  of this crate can wait behind unrelated work in another checkout. Proposed:
-  lock by actual resource ownership; enforced by concurrency tests.
-
-Reported by: codex/machinery.
-
-## VER-046 - `brokkr bench` can save an empty baseline, and its environment gate passes on missing fields
-
-- Criterion filters bench IDs without failing when none match; brokkr forwards
-  the filter and writes a baseline stamp after a successful exit without
-  confirming any measurement exists. A mistyped filter or renamed ID saves an
-  empty baseline. Proposed: require a non-empty selection and present results
-  before publishing; test an unmatched filter.
-- Stamp comparison checks only fields present on both sides, so a missing CPU,
-  compiler, flags variable or config digest is not a mismatch. Proposed: record
-  explicit absence and capture failure, version the stamp schema, require
-  complete provenance by default.
-- opus/bench: `brokkr bench --commit`, the only way to measure a historical
-  commit (needed to re-measure the numbers in VER-024), uses git worktrees,
-  which the user's global instructions forbid. Needs a decision before anyone
-  re-measures.
-
-Reported by: codex/bench, opus/bench.
 
 ## VER-047 - Published package contents are implicit
 
 `Cargo.toml` has no `include` or `exclude`, so `cargo publish` ships
 `AGENTS.md`, `CLAUDE.md`, `LLM.md`, `.review.toml` (with its audit id),
-`brokkr.toml`, `benches/` and `tests/`. brokkr's `publish_cycle` checks
+`brokkr.toml` and `tests/` (`bench/` is a nested package, which cargo
+leaves out). brokkr's `publish_cycle` checks
 publication cycles, not contents. Proposed:
 `include = ["src/**", "README.md", "CHANGELOG.md", "LICENSE*"]`; enforceable by
 `cargo package --list` in a script check.

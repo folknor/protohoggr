@@ -11,7 +11,18 @@ repository = "https://github.com/folknor/protohoggr"
 keywords = ["protobuf", "varint", "wire-format", "encoding", "decoding"]
 categories = ["encoding", "parser-implementations"]
 
-[lints.clippy]
+[lints]
+workspace = true
+
+# The library has no dependencies of any kind, dev included (brokkr.toml
+# enforces it). The criterion bench lives in its own unpublished member so its
+# dependency tree is never compiled by the library's tests or clippy run;
+# default-members keeps plain cargo and brokkr runs on the library alone.
+[workspace]
+members = ["bench"]
+default-members = ["."]
+
+[workspace.lints.clippy]
 allow_attributes = "deny"
 uninlined_format_args = "deny"
 cloned_instead_of_copied = "deny"
@@ -50,13 +61,6 @@ doc_markdown = "deny"
 inline_always = "deny"
 missing_safety_doc = "deny"
 
-[lints.rust]
+[workspace.lints.rust]
 missing_docs = "deny"
 
-[dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
-varint-simd = "0.4"
-
-[[bench]]
-name = "varint"
-harness = false

@@ -1,0 +1,21 @@
+[package]
+name = "protohoggr-bench"
+version = "0.0.0"
+description = "Criterion benchmarks for protohoggr. Not published."
+license = "MIT OR Apache-2.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+protohoggr = { path = ".." }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+varint-simd = "0.4"
+
+[[bench]]
+name = "varint"
+harness = false

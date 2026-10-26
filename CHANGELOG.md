@@ -12,6 +12,9 @@
 - `zigzag_encode_32` now returns `u32` and `zigzag_decode_32` now takes `u32`, making the pair a pure 32-bit bijection. Widen encoder output with `u64::from`; narrow a raw varint with `as u32` before decoding. `Cursor::read_sint32` and `PackedSint32Iter` do this truncation themselves, per protobuf's rule that a `sint32` varint is truncated to 32 bits before zigzag decoding
 - Minimum supported Rust version raised from 1.85 to 1.87, the release that made `core::arch` intrinsics safe to call where their target feature is enabled
 
+### Changed
+- The benchmarks moved out of the published package into `bench/`, an unpublished workspace member (`protohoggr-bench`). protohoggr now has no dependencies of any kind, dev included, so its tests no longer build criterion, varint-simd and their dependency trees, nor need a C compiler for criterion's `alloca`. The varint-simd comparisons are x86_64-only and the batch decoders among them need SSSE3: builds without it skip them with a stderr notice instead of failing to compile, and every varint-simd benchmark ID now ends in the instruction-set level it was built at (`avx2`, `ssse3` or `sse2`)
+
 ### Documented
 - The packed iterators' `size_hint` lower bound (`remaining / 10`) is now documented as a deliberate deviation from the `Iterator` protocol: it holds when the remaining bytes decode cleanly, but a malformed varint ends iteration early, so on malformed input the iterator can yield up to `remaining / 10` fewer items than claimed, and adapters such as `cycle` can amplify the overclaim into a capacity-overflow panic. The upper bound always holds. A correct bound would need a content scan that costs every `collect` and `extend` on well-formed data. `count_packed_varints` is likewise documented as a capacity estimate, not a length, for bodies whose varints are not known to be well-formed
 
