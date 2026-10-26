@@ -37,7 +37,8 @@ macro_rules! wire_errors {
         // writes a 4-byte `Ok` tag with a zeroing idiom where the old error
         // stored an 8-byte immediate, one more retired instruction per
         // multi-byte varint, which did not show as more cycles under fat
-        // LTO. Remeasure before changing the representation.
+        // LTO. Remeasure before changing the representation, with the
+        // method in reference/performance.md.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         #[repr(u32)]
         pub enum WireError {

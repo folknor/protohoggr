@@ -2,7 +2,11 @@
 //!
 //! Run with: `brokkr bench varint`
 //!
-//! ## Decode scenarios (8000 zigzag-encoded sint64 deltas)
+//! Inputs: 8000 zigzag-encoded sint64 values, as one-byte (`small_1B`),
+//! mostly three-byte (`large_3B`) or exclusively ten-byte (`ten_10B`)
+//! varints.
+//!
+//! ## Decode scenarios
 //! 1. scalar    - current `PackedSint64Iter`
 //! 2. `simd_batch` - `decode_four_unsafe<u16>` for ≤2-byte varints (small deltas),
 //!    `decode_two_unsafe<u32>` for ≤5-byte varints (large deltas)
@@ -75,6 +79,26 @@ fn large_delta_data() -> (Vec<i64>, Vec<u8>) {
     make_packed_sint64(&[
         5000, -3200, 18000, -7500, 42000, -15000, 8700, -2100, 31000, -9900,
     ])
+}
+
+/// Ten-byte varints only, both signs: zigzag needs ten bytes exactly when
+/// `v >= 2^62` or `v < -2^62`. The longest varint protobuf allows, and the
+/// path where a 64-bit decoder's final-byte overflow check runs.
+fn ten_byte_data() -> (Vec<i64>, Vec<u8>) {
+    let data = make_packed_sint64(&[
+        1 << 62,
+        -(1 << 62) - 1,
+        i64::MAX,
+        i64::MIN,
+        (1 << 62) + 0x1234_5678,
+        -(1 << 62) - 0x1234_5679,
+        0x5555_5555_5555_5555,
+        -0x5555_5555_5555_5556,
+        (1 << 62) | 0x7f,
+        -(1 << 62) - 0x80,
+    ]);
+    assert_eq!(data.1.len(), 10 * N, "every value must encode to ten bytes");
+    data
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +252,7 @@ fn bench_scalar_iter(group: &mut BenchmarkGroup<'_, WallTime>, label: &str, data
 fn bench_decode(c: &mut Criterion) {
     let (_, small_packed) = small_delta_data();
     let (_, large_packed) = large_delta_data();
+    let (_, ten_packed) = ten_byte_data();
 
     let mut group = c.benchmark_group("decode_sint64");
     group.throughput(criterion::Throughput::Elements(N as u64));
@@ -248,6 +273,12 @@ fn bench_decode(c: &mut Criterion) {
     #[cfg(target_arch = "x86_64")]
     simd::decode_single(&mut group, "large_3B", &large_packed);
 
+    // The batch decoders take at most five-byte varints, so only the
+    // single-value comparison applies here.
+    bench_scalar_iter(&mut group, "ten_10B", &ten_packed);
+    #[cfg(target_arch = "x86_64")]
+    simd::decode_single(&mut group, "ten_10B", &ten_packed);
+
     group.finish();
 }
 
@@ -258,11 +289,16 @@ fn bench_decode(c: &mut Criterion) {
 fn bench_encode(c: &mut Criterion) {
     let (small_values, _) = small_delta_data();
     let (large_values, _) = large_delta_data();
+    let (ten_values, _) = ten_byte_data();
 
     let mut group = c.benchmark_group("encode_sint64");
     group.throughput(criterion::Throughput::Elements(N as u64));
 
-    for (label, values) in [("small_1B", &small_values), ("large_3B", &large_values)] {
+    for (label, values) in [
+        ("small_1B", &small_values),
+        ("large_3B", &large_values),
+        ("ten_10B", &ten_values),
+    ] {
         // 4) scalar encode_packed_sint64
         group.bench_with_input(BenchmarkId::new("scalar", label), values, |b, vals| {
             let mut buf = Vec::with_capacity(vals.len() * 2);

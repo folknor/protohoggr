@@ -8,6 +8,9 @@ This crate is optimized for **speed on well-formed protobuf data**, not for adve
 ## Project structure
 
 Single-library crate. Implementation in `src/lib.rs`, integration tests in `tests/wire.rs`.
+Benchmarks live in `bench/`, an unpublished workspace member: criterion targets
+plus `examples/ab.rs`, a same-binary A/B against a pinned baseline revision.
+How to measure, and why it is done that way, is in `reference/performance.md`.
 
 Benchmarks live in `bench/`, a separate unpublished workspace member
 (`protohoggr-bench`) that owns criterion and varint-simd, so the library's own

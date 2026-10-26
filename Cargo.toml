@@ -22,6 +22,19 @@ workspace = true
 members = ["bench"]
 default-members = ["."]
 
+# Release (and bench, which inherits it) builds the way the crate's consumers
+# build it - pbfhogg and elivagar both use fat LTO with one codegen unit - so
+# benchmark numbers describe the code they ship. Dependents never read these
+# profiles. release-abort adds elivagar's panic strategy for runs of the ab
+# example; cargo ignores panic for bench targets. See reference/performance.md.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.release-abort]
+inherits = "release"
+panic = "abort"
+
 [workspace.lints.clippy]
 allow_attributes = "deny"
 uninlined_format_args = "deny"
