@@ -2189,75 +2189,102 @@ fn cumulative_stops_matches_packed_iter_on_overflow() {
 }
 
 // ---------------------------------------------------------------------------
-// encode_varint_to_slice
+// Canonical varint fixtures: hand-written bytes, independent of every encoder
+// in the crate. Each value sits on one side of a 7-bit group boundary, so
+// together they cover every encoded length from 1 to 10 bytes from both
+// ends. The unchecked decoder tests take their input only from here: an
+// encoder bug must fail a test, never turn into an out-of-contract unsafe
+// call.
+// ---------------------------------------------------------------------------
+
+const CANONICAL_VARINTS: &[(u64, &[u8])] = &[
+    (0, &[0x00]),
+    (1, &[0x01]),
+    (127, &[0x7F]),
+    (128, &[0x80, 0x01]),
+    (300, &[0xAC, 0x02]),
+    (16_383, &[0xFF, 0x7F]),
+    (16_384, &[0x80, 0x80, 0x01]),
+    ((1 << 21) - 1, &[0xFF, 0xFF, 0x7F]),
+    (1 << 21, &[0x80, 0x80, 0x80, 0x01]),
+    ((1 << 28) - 1, &[0xFF, 0xFF, 0xFF, 0x7F]),
+    (1 << 28, &[0x80, 0x80, 0x80, 0x80, 0x01]),
+    (0xFFFF_FFFF, &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+    ((1 << 35) - 1, &[0xFF, 0xFF, 0xFF, 0xFF, 0x7F]),
+    (1 << 35, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
+    ((1 << 42) - 1, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]),
+    (1 << 42, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
+    ((1 << 49) - 1, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]),
+    (1 << 49, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
+    (
+        (1 << 56) - 1,
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F],
+    ),
+    (
+        1 << 56,
+        &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+    ),
+    (
+        (1 << 63) - 1,
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F],
+    ),
+    (
+        1 << 63,
+        &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+    ),
+    (
+        u64::MAX,
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+    ),
+];
+
+/// A byte placed after a fixture to show where a read stopped. It is itself
+/// a complete one-byte varint (5), so reading it back proves the cursor
+/// landed exactly on it.
+const SENTINEL: u8 = 0x05;
+
+/// `bytes` followed by `SENTINEL`.
+fn with_sentinel(bytes: &[u8]) -> Vec<u8> {
+    let mut data = bytes.to_vec();
+    data.push(SENTINEL);
+    data
+}
+
+#[test]
+fn canonical_fixtures_cover_every_length() {
+    let mut lengths: Vec<usize> = CANONICAL_VARINTS.iter().map(|(_, b)| b.len()).collect();
+    lengths.dedup();
+    assert_eq!(lengths, (1..=10).collect::<Vec<_>>());
+}
+
+// ---------------------------------------------------------------------------
+// encode_varint_to_array
 // ---------------------------------------------------------------------------
 
 #[test]
-fn encode_to_slice_1byte() {
-    let mut buf = [0u8; 10];
-    for value in [0u64, 1, 127] {
-        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
-        assert_eq!(n, 1, "value={value}");
-        // Roundtrip.
-        let mut c = Cursor::new(&buf[..n]);
-        assert_eq!(c.read_varint().unwrap(), value);
-    }
-}
-
-#[test]
-fn encode_to_slice_2byte() {
-    let mut buf = [0u8; 10];
-    for value in [128u64, 300, 16383] {
-        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
-        assert_eq!(n, 2, "value={value}");
-        let mut c = Cursor::new(&buf[..n]);
-        assert_eq!(c.read_varint().unwrap(), value);
-    }
-}
-
-#[test]
-fn encode_to_slice_3byte_boundary() {
-    let mut buf = [0u8; 10];
-    let n = unsafe { encode_varint_to_slice(&mut buf, 16384) };
-    assert_eq!(n, 3);
-    let mut c = Cursor::new(&buf[..n]);
-    assert_eq!(c.read_varint().unwrap(), 16384);
-}
-
-#[test]
-fn encode_to_slice_max() {
-    let mut buf = [0u8; 10];
-    let n = unsafe { encode_varint_to_slice(&mut buf, u64::MAX) };
-    assert_eq!(n, 10);
-    let mut c = Cursor::new(&buf[..n]);
-    assert_eq!(c.read_varint().unwrap(), u64::MAX);
-}
-
-#[test]
-fn encode_to_slice_roundtrip_sweep() {
-    // Sweep through varint size boundaries.
-    let values = [
-        0u64,
-        1,
-        127,
-        128,
-        16383,
-        16384,
-        2097151,
-        2097152,
-        u32::MAX as u64,
-        u64::MAX,
-    ];
-    let mut buf = [0u8; 10];
-    for value in values {
-        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
-        let mut c = Cursor::new(&buf[..n]);
-        assert_eq!(
-            c.read_varint().unwrap(),
-            value,
-            "roundtrip failed for {value}"
+fn encode_to_array_writes_canonical_bytes() {
+    for &(value, bytes) in CANONICAL_VARINTS {
+        let mut buf = [0xAA; 10];
+        let n = encode_varint_to_array(&mut buf, value);
+        assert_eq!(&buf[..n], bytes, "value={value}");
+        assert!(
+            buf[n..].iter().all(|&b| b == 0xAA),
+            "bytes past the returned length were written for value={value}"
         );
-        assert!(c.is_empty(), "trailing bytes for {value}");
+    }
+}
+
+#[test]
+fn encode_to_array_matches_encode_varint() {
+    let mut buf = [0u8; 10];
+    let mut expected = Vec::new();
+    for shift in 0..64 {
+        for value in [1u64 << shift, (1u64 << shift) - 1, (1u64 << shift) + 1] {
+            expected.clear();
+            encode_varint(&mut expected, value);
+            let n = encode_varint_to_array(&mut buf, value);
+            assert_eq!(&buf[..n], &expected[..], "value={value}");
+        }
     }
 }
 
@@ -2266,85 +2293,89 @@ fn encode_to_slice_roundtrip_sweep() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unchecked_single_byte() {
-    for value in [0u64, 1, 127] {
-        let mut buf = [0u8; 10];
-        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
-        let mut c = Cursor::new(&buf[..n]);
-        let result = unsafe { c.read_varint_unchecked() };
-        assert_eq!(result, value, "value={value}");
+fn unchecked_canonical_fixtures() {
+    for &(value, bytes) in CANONICAL_VARINTS {
+        // Exactly the varint: the terminal byte is the slice's last byte.
+        let mut c = Cursor::new(bytes);
+        // SAFETY: every fixture ends in a terminal byte.
+        assert_eq!(unsafe { c.read_varint_unchecked() }, value);
+        assert_eq!(c.position(), bytes.len(), "value={value}");
+
+        // Followed by more data: the read stops after the terminal byte.
+        let data = with_sentinel(bytes);
+        let mut c = Cursor::new(&data);
+        // SAFETY: the fixture's terminal byte precedes the sentinel.
+        assert_eq!(unsafe { c.read_varint_unchecked() }, value);
+        assert_eq!(c.position(), bytes.len(), "value={value}");
+        // SAFETY: the sentinel is itself a terminal byte.
+        assert_eq!(unsafe { c.read_varint_unchecked() }, u64::from(SENTINEL));
         assert!(c.is_empty());
     }
-}
-
-#[test]
-fn unchecked_multi_byte() {
-    for value in [128u64, 150, 300, 16383, 16384, 2097151] {
-        let mut buf = [0u8; 10];
-        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
-        let mut c = Cursor::new(&buf[..n]);
-        let result = unsafe { c.read_varint_unchecked() };
-        assert_eq!(result, value, "value={value}");
-        assert!(c.is_empty());
-    }
-}
-
-#[test]
-fn unchecked_u64_max() {
-    let mut buf = [0u8; 10];
-    let n = unsafe { encode_varint_to_slice(&mut buf, u64::MAX) };
-    let mut c = Cursor::new(&buf[..n]);
-    let result = unsafe { c.read_varint_unchecked() };
-    assert_eq!(result, u64::MAX);
-    assert!(c.is_empty());
 }
 
 #[test]
 fn unchecked_matches_checked() {
-    // Verify identical results and cursor advancement for a range of valid values.
-    let values = [
-        0u64,
-        1,
-        127,
-        128,
-        300,
-        16383,
-        16384,
-        u32::MAX as u64,
-        u64::MAX,
+    // Same value and same cursor advance as read_varint, on canonical and
+    // non-minimal encodings alike.
+    let non_minimal: &[(u64, &[u8])] = &[
+        (0, &[0x80, 0x00]),
+        (127, &[0xFF, 0x80, 0x00]),
+        (1, &[0x81, 0x80, 0x80, 0x00]),
+        (
+            0,
+            &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00],
+        ),
     ];
-    for value in values {
-        let mut buf = [0u8; 10];
-        let n = unsafe { encode_varint_to_slice(&mut buf, value) };
-
-        let mut checked = Cursor::new(&buf[..n]);
-        let mut unchecked = Cursor::new(&buf[..n]);
-
-        let checked_val = checked.read_varint().unwrap();
-        let unchecked_val = unsafe { unchecked.read_varint_unchecked() };
-
-        assert_eq!(checked_val, unchecked_val, "value mismatch for {value}");
-        assert_eq!(
-            checked.position(),
-            unchecked.position(),
-            "position mismatch for {value}"
-        );
+    for &(value, bytes) in CANONICAL_VARINTS.iter().chain(non_minimal) {
+        let data = with_sentinel(bytes);
+        let mut checked = Cursor::new(&data);
+        let mut unchecked = Cursor::new(&data);
+        assert_eq!(checked.read_varint().unwrap(), value, "bytes={bytes:02X?}");
+        // SAFETY: every fixture ends in a terminal byte.
+        assert_eq!(unsafe { unchecked.read_varint_unchecked() }, value);
+        assert_eq!(unchecked.position(), bytes.len(), "bytes={bytes:02X?}");
+        assert_eq!(checked.position(), unchecked.position());
     }
 }
 
 #[test]
 fn unchecked_sequential_reads() {
-    // Multiple varints back to back, read sequentially with unchecked.
-    let values = [1u64, 300, 127, 16384, 0];
-    let mut encoded = Vec::new();
-    for &v in &values {
-        encode_varint(&mut encoded, v);
-    }
-
-    let mut c = Cursor::new(&encoded);
-    for &expected in &values {
-        let result = unsafe { c.read_varint_unchecked() };
-        assert_eq!(result, expected);
+    // 1, 300, 127, 16384, 0 back to back.
+    let data = [0x01, 0xAC, 0x02, 0x7F, 0x80, 0x80, 0x01, 0x00];
+    let mut c = Cursor::new(&data);
+    for (expected, end) in [(1u64, 1), (300, 3), (127, 4), (16_384, 7), (0, 8)] {
+        // SAFETY: the data ends in a terminal byte, so one follows every
+        // position before the end.
+        assert_eq!(unsafe { c.read_varint_unchecked() }, expected);
+        assert_eq!(c.position(), end);
     }
     assert!(c.is_empty());
+}
+
+#[test]
+fn unchecked_malformed_but_terminated_stops_after_terminal() {
+    // Inside the safety contract (a terminal byte exists) but not valid
+    // varints: an 11-byte run, an overflowing 10th byte, and a run long
+    // enough to push the shift amount far past 64. The value is unspecified
+    // and not asserted; the read must not panic in any profile and must
+    // stop exactly after the terminal byte.
+    let mut long_run = vec![0xFF; 200];
+    long_run.push(0x7F);
+    let cases: [&[u8]; 3] = [
+        &[
+            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+        ],
+        &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02],
+        &long_run,
+    ];
+    for bytes in cases {
+        let data = with_sentinel(bytes);
+        let mut c = Cursor::new(&data);
+        // SAFETY: each case ends in a terminal byte.
+        let _ = unsafe { c.read_varint_unchecked() };
+        assert_eq!(c.position(), bytes.len());
+        // SAFETY: the sentinel is itself a terminal byte.
+        assert_eq!(unsafe { c.read_varint_unchecked() }, u64::from(SENTINEL));
+        assert!(c.is_empty());
+    }
 }

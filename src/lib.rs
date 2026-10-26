@@ -287,51 +287,72 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Read a varint (LEB128) without bounds or validity checks. Infallible.
+    /// Read a varint (LEB128) without bounds or validity checks.
     ///
-    /// This is the **unchecked decoding** counterpart to
-    /// [`read_varint`](Cursor::read_varint): both bounds checks (slice end)
-    /// and value-shape checks (overflow, overlong) are removed. The caller is
-    /// responsible for ensuring the data is well-formed - this is not merely
-    /// "unchecked bounds."
+    /// The unchecked counterpart to [`read_varint`](Cursor::read_varint):
+    /// no check against the end of the data, and no check of the varint's
+    /// shape. It reads bytes up to and including the first one with its high
+    /// bit clear (the terminal byte), leaves the cursor just past it, and
+    /// returns the decoded value.
+    ///
+    /// On a well-formed varint the value and the new position are the ones
+    /// `read_varint` gives, including for non-minimal encodings such as
+    /// `[0x80, 0x00]`. A terminated but malformed varint - longer than ten
+    /// bytes, or a tenth byte above `0x01` - is not an error and not UB: the
+    /// read still stops after its terminal byte, and returns an unspecified
+    /// value. It never panics, in any build profile.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that at the current position there exists a
-    /// complete, well-formed varint:
-    ///
-    /// 1. At least one byte with MSB=0 (terminal) exists before the end of
-    ///    the underlying slice.
-    /// 2. The varint is at most 10 bytes and does not overflow `u64` (if a
-    ///    10th byte is present, it must be `<= 1`).
-    ///
-    /// Violating condition 1 causes an out-of-bounds read (UB). Violating
-    /// condition 2 produces an unspecified value (not UB, but meaningless).
+    /// A byte with its high bit clear must exist at or after the current
+    /// position, before the end of the underlying slice. In particular the
+    /// cursor must not be empty. Without one, the read runs past the end of
+    /// the slice (UB). A terminal byte earlier in the slice, before the
+    /// current position, does not count.
     #[inline]
     pub unsafe fn read_varint_unchecked(&mut self) -> u64 {
-        // SAFETY: caller guarantees a valid varint at pos.
+        // SAFETY: the caller guarantees a terminal byte at or after `pos`,
+        // inside `data`, so `pos` is in bounds.
         let b = unsafe { *self.data.get_unchecked(self.pos) };
         self.pos += 1;
         if b < 0x80 {
             return u64::from(b);
         }
-        // SAFETY: caller guarantees completeness - slow path won't read OOB.
+        // SAFETY: `b` was not the terminal byte, so the caller's terminal
+        // byte lies at or after the new `pos`.
         unsafe { self.read_varint_unchecked_slow(u64::from(b & 0x7F)) }
     }
 
+    /// Continuation of [`read_varint_unchecked`](Self::read_varint_unchecked)
+    /// after a first byte with its high bit set.
+    ///
+    /// # Safety
+    ///
+    /// A byte with its high bit clear must exist at or after the current
+    /// position, before the end of the underlying slice.
     #[cold]
     unsafe fn read_varint_unchecked_slow(&mut self, mut val: u64) -> u64 {
         let mut shift: u32 = 7;
         loop {
-            // SAFETY: caller of read_varint_unchecked guarantees a terminal
-            // byte exists before end of slice.
+            // SAFETY: every byte before the terminal one continues the loop,
+            // and the terminal byte returns, so `pos` never passes it; the
+            // caller guarantees it lies inside `data`.
             let b = unsafe { *self.data.get_unchecked(self.pos) };
             self.pos += 1;
-            val |= u64::from(b & 0x7F) << shift;
+            // Both wrapping ops are what keep an over-long varint inside the
+            // documented contract (unspecified value, no panic): a plain
+            // `<<` panics in debug once `shift` reaches 64, and a plain `+=`
+            // would overflow `shift` on a run of continuation bytes longer
+            // than about 600 million. With overflow checks off (release),
+            // Rust defines plain `<<` and `+=` to mask and wrap exactly as
+            // these do, so release semantics are the same as before; on a
+            // late-2026 nightly on x86-64 the release machine code was
+            // byte-identical too.
+            val |= u64::from(b & 0x7F).wrapping_shl(shift);
             if b < 0x80 {
                 return val;
             }
-            shift += 7;
+            shift = shift.wrapping_add(7);
         }
     }
 
@@ -1178,43 +1199,49 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
     buf.push(value as u8);
 }
 
-/// Encode a `u64` as a variable-length integer (LEB128) into a pre-allocated
-/// slice, returning the number of bytes written.
+/// Encode a `u64` as a variable-length integer (LEB128) into the front of a
+/// 10-byte array, returning the number of bytes written (1 to 10). Bytes
+/// past the returned length are left as they were.
 ///
-/// Includes a branchless fast path for 1-byte (`< 128`) and 2-byte
-/// (`< 16384`) values, covering ~95% of zigzag-encoded OSM way-ref deltas.
+/// Ten bytes is the longest a `u64` varint can be, so the array type is the
+/// whole precondition and no call can write out of bounds. The intended use
+/// is a reused stack array copied out with `&buf[..n]`; writing straight
+/// into a larger buffer means getting a `&mut [u8; 10]` from it, typically
+/// with `first_chunk_mut::<10>()`, which is a length check per call unless
+/// the optimizer can remove it.
 ///
-/// # Safety
-///
-/// Caller must ensure `buf.len() >= 10`.
+/// Has dedicated 1-byte (`< 128`) and 2-byte (`< 16384`) fast paths, covering
+/// ~95% of zigzag-encoded OSM way-ref deltas.
 #[inline]
 #[expect(clippy::cast_possible_truncation)]
-pub unsafe fn encode_varint_to_slice(buf: &mut [u8], value: u64) -> usize {
+pub fn encode_varint_to_array(buf: &mut [u8; 10], value: u64) -> usize {
     // 1-byte fast path: value < 128
     if value < 0x80 {
-        // SAFETY: caller guarantees buf.len() >= 10.
-        unsafe { *buf.get_unchecked_mut(0) = value as u8 };
+        buf[0] = value as u8;
         return 1;
     }
     // 2-byte fast path: value < 16384
     if value < 0x4000 {
-        // SAFETY: caller guarantees buf.len() >= 10.
-        unsafe {
-            *buf.get_unchecked_mut(0) = (value as u8) | 0x80;
-            *buf.get_unchecked_mut(1) = (value >> 7) as u8;
-        }
+        buf[0] = (value as u8) | 0x80;
+        buf[1] = (value >> 7) as u8;
         return 2;
     }
     // General path for values >= 16384.
     let mut value = value;
     let mut i = 0usize;
     while value >= 0x80 {
-        // SAFETY: caller guarantees buf.len() >= 10, and a u64 varint is at most 10 bytes.
+        // SAFETY: each pass shifts `value` right by 7, and a u64 is below
+        // 0x80 after nine shifts, so this loop writes at most indices 0..=8
+        // and leaves `i <= 9`: in bounds for a 10-element array. Plain
+        // indexing also compiles without a bounds check (late-2026 nightly,
+        // x86-64), but LLVM then unrolls the whole loop into a nine-way
+        // compare chain; this form stays a compact loop. Neither has been
+        // measured against the other.
         unsafe { *buf.get_unchecked_mut(i) = (value as u8) | 0x80 };
         value >>= 7;
         i += 1;
     }
-    // SAFETY: i < 10 at this point.
+    // SAFETY: `i <= 9`, see the loop above.
     unsafe { *buf.get_unchecked_mut(i) = value as u8 };
     i + 1
 }

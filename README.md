@@ -20,7 +20,7 @@ The 32-bit decoders (`read_sint32` and the `int32`, `uint32` and `sint32` packed
 - **Cursor** - zero-copy reader over a byte slice: varints (LEB128), zigzag-decoded sint32/sint64, tags, length-delimited fields, fixed-width 32/64, float/double, field skipping, raw field extraction, `read_varint_unchecked` for validated regions
 - **Packed iterators** - `PackedIter`, `PackedSint64Iter`, `PackedSint32Iter`, `PackedInt64Iter`, `PackedInt32Iter`, `PackedUint32Iter`, `PackedBoolIter`
 - **Batch packed operations** - `count_packed_varints` (SSE2 SIMD on x86-64), `decode_packed_sint64_cumulative` (batch decode with cumulative sum)
-- **Varint/zigzag encoding** - `encode_varint`, `encode_varint_to_slice` (unsafe, slice-based with branchless 1-2 byte fast path), `zigzag_encode_64`, `zigzag_encode_32`
+- **Varint/zigzag encoding** - `encode_varint`, `encode_varint_to_array` (into a 10-byte array, with 1-2 byte fast paths), `zigzag_encode_64`, `zigzag_encode_32`
 - **Field encoders** - varint, int64, int32, uint32, bool, bytes, sint64, sint32, fixed32, fixed64, float, double - each with a skip-zero default and an `_always` variant
 - **Packed repeated field encoders** - `encode_packed_uint32`, `encode_packed_int32`, `encode_packed_sint64`, `encode_packed_sint32`, `encode_packed_bool`
 

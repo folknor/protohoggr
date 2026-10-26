@@ -122,7 +122,7 @@ Proposed: a single private `#[inline]` varint-step function used by
 `cumulative(data, base) == PackedSint64Iter::new(data).scan(base, wrapping_add)`
 over exhaustive short byte strings plus a seeded in-file PRNG (xorshift, no
 dependency) for longer valid and corrupted bodies. The same approach covers
-`read_varint_unchecked` vs `read_varint` and `encode_varint_to_slice` vs
+`read_varint_unchecked` vs `read_varint` and `encode_varint_to_array` vs
 `encode_varint` (opus/machinery). Enforceable by the test; structurally by the
 shared core.
 
@@ -214,40 +214,20 @@ slices. Enforceable by tests; a textlint rule against `EPSILON` in `tests/`
 
 Reported by: codex/tests, opus/tests, opus/machinery.
 
-## VER-012 - Unsafe-decoder tests take their precondition from the encoder under test, and one unsafe contract could be a type
-
-`wire.rs` tests around `unchecked_*` feed `encode_varint_to_slice` output
-straight into `read_varint_unchecked`, so an encoder regression turns a test
-failure into an invalid unsafe call (codex/tests).
-
-`encode_varint_to_slice`'s only safety requirement is `buf.len() >= 10`;
-taking `&mut [u8; 10]` (or a capacity-bearing wrapper) makes it structural and
-the function safe, with callers doing one `try_into()` per site
-(codex/tests, codex/machinery, opus/machinery). codex/machinery: the
-"validated regions" that `read_varint_unchecked` relies on have no
-representation; a validated packed-region type could carry the proof.
-`missing_safety_doc` establishes that documentation exists, not that callers
-meet it.
-
-Proposed: hand the unsafe decoder independently known valid byte vectors; the
-signature change. Enforceable by the signature and independent fixtures.
-
-Reported by: codex/tests, codex/machinery, opus/machinery.
-
 ## VER-013 - Unsafe code has no Miri lane, and `SAFETY:` comments are a convention nothing enforces
 
-`read_varint_unchecked`, `read_varint_unchecked_slow`, `encode_varint_to_slice`,
+`read_varint_unchecked`, `read_varint_unchecked_slow`, `encode_varint_to_array`,
 `Cursor::rest` (sound only while the `pos <= data.len()` field invariant holds)
 and the raw-pointer loads in `count_packed_varints_sse2` are tested only
 natively, where a one-byte over-read does not crash. Debug `ub_checks` on
 `get_unchecked` catch some over-reads in the dev profile; the SSE2 `ptr.add`
-reads are not covered (opus/tests). The `SAFETY:` comments in the slow path
-("slow path won't read OOB") are unverified. opus/tests: the tests slice
-exactly to `n` bytes, so they are well shaped for Miri.
+reads are not covered (opus/tests). The `SAFETY:` comments in the unchecked
+decoder's slow path are argued, not checked by any tool. The unchecked
+decoder tests read hand-written fixtures that end in a terminal byte, with
+and without a trailing sentinel, so they are well shaped for Miri.
 
-`src/lib.rs` comments every unsafe block; the tests' `unsafe` blocks and the
-bench's two unsafe calls carry none (opus/tests, opus/machinery,
-opus/bench). Private `read_varint_unchecked_slow` has no `# Safety` section.
+`src/lib.rs` and the tests comment every unsafe block; the bench's two unsafe
+calls carry none (opus/tests, opus/machinery, opus/bench).
 
 opus/brokkr-config: Miri on the host and on foreign targets covers UB, 32-bit
 `usize` (the `*_huge_len_*` tests in `tests/wire.rs` feed a length of
@@ -355,9 +335,7 @@ opus/bench, opus/brokkr-config.
 ## VER-015 - Tests run only under the dev profile; consumers ship release
 
 The check builds and tests dev only (overflow checks and debug assertions on).
-pbfhogg and elivagar run release, where: `read_varint_unchecked_slow` with a
-too-long varint masks the shift instead of panicking (VER-020);
-`get_unchecked` `ub_checks` are off (including the one in `Cursor::rest` that
+pbfhogg and elivagar run release, where `get_unchecked` `ub_checks` are off (including the one in `Cursor::rest` that
 backs its field invariant); the optimizer may act on UB
 in the unsafe paths.
 
@@ -461,26 +439,6 @@ toolchain be pinned?
 Reported by: codex/machinery, opus/tests, opus/bench, opus/machinery,
 opus/brokkr-config.
 
-## VER-020 - `read_varint_unchecked`'s doc promises behaviour outside its contract that is false in debug
-
-The safety doc says violating condition 2 (over-long or overflowing) "produces
-an unspecified value (not UB, but meaningless)", and the summary says
-"Infallible". An over-long terminated sequence makes
-`read_varint_unchecked_slow` compute `<< 70`: in debug (the only profile the
-tests run) that panics with "attempt to shift left with overflow"; in release
-the shift is masked. The ignored `.plans/dynamic-beaming-giraffe.md`
-contradicts the doc by calling it UB (opus/machinery).
-
-Proposed: reword ("may panic in debug builds or return an unspecified value"),
-remove the behavioural promise for invalid input (codex/machinery), or cap the
-slow loop at 10 bytes, which costs nothing on the hot path (opus/machinery).
-codex/machinery: do not add tests that violate an unsafe precondition just to
-preserve the sentence. opus/tests and opus/machinery note a `#[should_panic]`
-test under `debug_assertions` would document rather than guard it; capping the
-loop holds it structurally.
-
-Reported by: codex/machinery, opus/tests, opus/machinery.
-
 ## Benchmark
 
 ## VER-021 - The benchmark has no correctness gate and is never run by the check
@@ -534,13 +492,13 @@ Reported by: codex/bench, opus/bench, opus/machinery.
 - `padded()` says the 16 zero bytes keep SIMD reads in bounds; since the 0.3.0
   fix the batch loops never read padding, so the stated reason no longer holds
   and the padding only steers the tail into a no-copy path (opus/bench).
-- `encode_varint_to_slice`, the like-for-like counterpart to
+- `encode_varint_to_array`, the like-for-like counterpart to
   `encode_to_slice`, is never measured.
 
 Proposed: separate raw-varint and complete-packed-field comparisons with
 identical output contracts and byte-for-byte equality checked outside timing;
 same input wrapping and padding on both sides; observe written slices the same
-way; compare `encode_varint_to_slice` with `encode_unsafe` plus a 16-byte
+way; compare `encode_varint_to_array` with `encode_unsafe` plus a 16-byte
 store. Enforceable partly: shared adapter signatures make symmetry structural;
 fairness itself cannot be linted.
 
@@ -566,7 +524,7 @@ Reported by: codex/bench, opus/bench, opus/machinery.
 Claims: `Cursor::read_varint` doc (scalar 2.3x faster than batch4 for 1-byte,
 tied for 3-byte, "perfectly predicted"); `encode_varint` doc (3.5x and 1.5x);
 CHANGELOG 0.2.0 ("2-6x on decode, 1.5-3.5x on encode");
-`encode_varint_to_slice` doc, README and CHANGELOG 0.4.0 ("~95% of
+`encode_varint_to_array` doc and CHANGELOG 0.4.0 ("~95% of
 zigzag-encoded OSM way-ref deltas"). Reported problems:
 
 - No retained result names hardware, compiler, flags, confidence intervals or
@@ -593,7 +551,7 @@ zigzag-encoded OSM way-ref deltas"). Reported problems:
 - "perfectly predicted": the data is 100% 1-byte in a period-10 pattern and
   nothing measured branch misses.
 - 0.4.0's hot-path primitives (`decode_packed_sint64_cumulative`,
-  `count_packed_varints`, `read_varint_unchecked`, `encode_varint_to_slice`)
+  `count_packed_varints`, `read_varint_unchecked`, `encode_varint_to_array`)
   were added as performance work and none is benchmarked; `scalar_iter` still
   times the `PackedSint64Iter` path the 0.4.0 entry says is being replaced; the
   justification lives in an ignored `.plans/` file (codex/bench, opus/bench).
@@ -790,7 +748,7 @@ Reported by: opus/tests.
 
 - README: "All encoding functions skip zero/empty/false values by default"
   (repeated in AGENTS.md). `encode_varint(0)`, `encode_tag` and
-  `encode_varint_to_slice` do not; the policy holds for field encoders.
+  `encode_varint_to_array` do not; the policy holds for field encoders.
   Behaviour tables can hold it (codex/tests, codex/machinery, opus/machinery).
 - README: "see the doc comments on `PackedIter::next`, `skip_varint`, and
   `read_tag`". The `PackedIter::next` rationale is a `//` comment in the body,
@@ -800,12 +758,6 @@ Reported by: opus/tests.
 - README: "rejects malformed sequences" can be read as covering non-canonical
   encodings; `read_varint` accepts `[0x80, 0x00]` as 0, which protobuf permits
   (opus/machinery, wording only).
-- "branchless" 1-byte and 2-byte fast path (`encode_varint_to_slice` doc,
-  README, CHANGELOG 0.4.0): the code is two `if` early returns; whether LLVM
-  emits a cmov is unchecked, and no benchmark exercises the function. Reword
-  ("1-byte and 2-byte fast paths"); an asm snapshot test could hold it but would
-  be fragile across nightly bumps (codex/bench, codex/machinery, opus/tests,
-  opus/bench, opus/machinery).
 
 Reported by: codex/tests, codex/bench, codex/machinery, opus/tests,
 opus/bench, opus/machinery.
