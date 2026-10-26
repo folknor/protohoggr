@@ -297,7 +297,8 @@ Reported by: codex/tests, codex/machinery, opus/machinery.
 
 ## VER-013 - Unsafe code has no Miri lane, and `SAFETY:` comments are a convention nothing enforces
 
-`read_varint_unchecked`, `read_varint_unchecked_slow`, `encode_varint_to_slice`
+`read_varint_unchecked`, `read_varint_unchecked_slow`, `encode_varint_to_slice`,
+`Cursor::rest` (sound only while the `pos <= data.len()` field invariant holds)
 and the raw-pointer loads in `count_packed_varints_sse2` are tested only
 natively, where a one-byte over-read does not crash. Debug `ub_checks` on
 `get_unchecked` catch some over-reads in the dev profile; the SSE2 `ptr.add`
@@ -310,7 +311,10 @@ bench's two unsafe calls carry none (opus/tests, opus/machinery,
 opus/bench). Private `read_varint_unchecked_slow` has no `# Safety` section.
 
 opus/brokkr-config: Miri on the host and on foreign targets covers UB, 32-bit
-`usize` (the `read_len_delimited` truncation in `notes/bugs.md`), big-endian byte order (every fixed-width
+`usize` (the `*_huge_len_*` tests in `tests/wire.rs` feed a length of
+2^32 + 3, which only a 32-bit run turns into a check that `read_len_delimited`
+narrows with `try_from` rather than truncating; on 64-bit they cannot tell),
+big-endian byte order (every fixed-width
 path uses `to_le_bytes`/`from_le_bytes`; nothing tests a big-endian target)
 and the scalar fallback (VER-014) at once, with no linker. Proposed
 `brokkr.toml` entries:
@@ -402,8 +406,8 @@ opus/bench, opus/brokkr-config.
 The check builds and tests dev only (overflow checks and debug assertions on).
 pbfhogg and elivagar run release, where: `read_varint_unchecked_slow` with a
 too-long varint masks the shift instead of panicking (VER-020);
-`get_unchecked` `ub_checks` are off; `read_len_delimited`'s addition wraps
-instead of panicking (filed in `notes/bugs.md`); the optimizer may act on UB
+`get_unchecked` `ub_checks` are off (including the one in `Cursor::rest` that
+backs its field invariant); the optimizer may act on UB
 in the unsafe paths.
 
 A second, related divergence: `brokkr test NAME` defaults to release while
@@ -831,8 +835,8 @@ opus/brokkr-config.
 curated while lints the crate does need are absent:
 `undocumented_unsafe_blocks` and `multiple_unsafe_ops_per_block` (VER-013),
 `allow_attributes` (VER-027), `arithmetic_side_effects` on the cursor
-arithmetic and `indexing_slicing` on the decoder (the `read_len_delimited`
-panic in `notes/bugs.md`),
+arithmetic and `indexing_slicing` on the decoder (bounded reads now go
+through `Cursor::take`, but the varint paths and `read_raw_field` still index),
 `missing_debug_implementations` (VER-035).
 
 Proposed: curate the list for a decoder of untrusted lengths with unsafe hot

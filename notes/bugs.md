@@ -19,48 +19,6 @@ Defects turned up by the verification hunt of 2026-10-26. Unverified: each is
 what the hunters reported, and the fix pass decides. "Reported by" names the
 hunter and scope (`codex/tests`, `opus/machinery` and so on).
 
-## BUG-001 - `read_len_delimited` panics or misreads on a huge length prefix instead of returning `Err`
-
-`Cursor::read_len_delimited` does `let len = self.read_varint()? as usize;`
-then `if self.pos + len > self.data.len()`, then slices
-`self.data[self.pos..self.pos + len]`.
-
-- 64-bit, dev profile: a length varint near `u64::MAX` overflows the addition
-  and panics ("attempt to add with overflow").
-- 64-bit, release: the addition wraps to a small value, the bounds check
-  passes, and the slice panics with an end before its start.
-- 32-bit: `as usize` truncates. A length of `2^32 + 3` reads as 3, the check
-  passes, a 3-byte slice is returned and decoding continues desynchronized: a
-  silent wrong answer. The `cast_possible_truncation` allow on the function is
-  the local exemption that hid this case (opus/tests).
-
-`skip_field(WIRE_LEN)` and `read_raw_field(WIRE_LEN)` inherit it. It
-contradicts AGENTS.md ("Use `WireResult<T>` / `WireError` for fallible
-operations, not panics"), README ("rejects malformed sequences") and the
-function's own error message. The hunters agree it is outside the
-well-formed-data performance goal and not memory-unsafe; opus/machinery notes a
-single corrupt byte in a PBF blob would abort pbfhogg or elivagar rather than
-surface an error. No test feeds a length larger than the remaining input by
-more than a few bytes (`read_raw_field_truncated_len_payload` uses 5 vs 2).
-
-Proposed fix: `usize::try_from` (or compare the `u64` before narrowing) and
-`len > self.remaining()`, plus a test with `encode_varint(u64::MAX)` as the
-prefix. opus/machinery adds that `read_fixed32`, `read_fixed64` and the fixed
-arms of `skip_field` use `self.pos + 4` / `+ 8`, which cannot overflow while
-`pos <= len`, but `pos` can exceed `len` after a contract-violating
-`read_varint_unchecked`; writing every bound as `n > self.remaining()` removes
-the question.
-
-Enforcement proposed: the regression test on 64-bit and (via Miri or a lane)
-32-bit targets; `clippy::arithmetic_side_effects` scoped to the decoder
-(opus/tests, opus/machinery); a `cargo fuzz` lane over `Cursor`
-(opus/machinery); the Miri i686 lane proposed in `notes/verification.md` (the unsafe-code
-entry) sees the 32-bit case once a
-test feeds such a length (opus/brokkr-config).
-
-Reported by: codex/tests, codex/machinery, opus/tests, opus/machinery,
-opus/brokkr-config.
-
 ## BUG-002 - Packed iterators resume after returning `None` on a decode error
 
 `PackedIter::next` returns `self.cursor.read_varint().ok()`. On the overflow

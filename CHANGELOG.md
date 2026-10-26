@@ -4,6 +4,7 @@
 
 ### Fixed
 - `zigzag_encode_32` sign-extended results with bit 31 set (inputs `>= 2^30` or `<= -2^30 - 1`, e.g. `i32::MIN`) to `u64`, so `encode_sint32_field`, `encode_sint32_field_always` and `encode_packed_sint32` wrote those values as non-canonical 10-byte varints instead of 5 bytes. Both protohoggr `sint32` decoding paths truncate to 32 bits before zigzag decoding, so the values read back correctly, but data written by earlier versions can contain this form and readers should keep accepting it
+- `Cursor::read_len_delimited` (and through it `skip_field(WIRE_LEN)` and `read_raw_field(WIRE_LEN)`) panicked on a length prefix near `u64::MAX` (`pos + len` overflowed), and on 32-bit targets truncated lengths `>= 2^32` and returned a short slice, leaving decoding desynchronized. Any length larger than the remaining input now returns `Err`, with the prefix consumed and the payload not
 
 ### Breaking
 - `zigzag_encode_32` now returns `u32` and `zigzag_decode_32` now takes `u32`, making the pair a pure 32-bit bijection. Widen encoder output with `u64::from`; narrow a raw varint with `as u32` before decoding. `Cursor::read_sint32` and `PackedSint32Iter` do this truncation themselves, per protobuf's rule that a `sint32` varint is truncated to 32 bits before zigzag decoding

@@ -487,6 +487,114 @@ fn read_raw_field_truncated_len_payload() {
     assert!(c.read_raw_field(WIRE_LEN).is_err());
 }
 
+/// A length prefix far past the end of the input, followed by `payload`.
+fn huge_len_input(len: u64, payload: &[u8]) -> (Vec<u8>, usize) {
+    let mut data = Vec::new();
+    encode_varint(&mut data, len);
+    let prefix_len = data.len();
+    data.extend_from_slice(payload);
+    (data, prefix_len)
+}
+
+/// Lengths that once overflowed `pos + len` (64-bit) or truncated under
+/// `as usize` (32-bit: 2^32 + 3 read as 3, matching the 3 payload bytes).
+const HUGE_LENS: [u64; 4] = [u64::MAX, u64::MAX - 1, (1 << 32) + 3, 1 << 63];
+
+#[test]
+fn read_len_delimited_huge_len_is_err() {
+    for len in HUGE_LENS {
+        let (data, prefix_len) = huge_len_input(len, &[0xAA, 0xBB, 0xCC]);
+        let mut c = Cursor::new(&data);
+        assert!(c.read_len_delimited().is_err(), "len {len}");
+        // The prefix is consumed, the payload is not.
+        assert_eq!(c.position(), prefix_len, "len {len}");
+        assert_eq!(c.remaining(), 3, "len {len}");
+    }
+}
+
+#[test]
+fn skip_field_len_huge_len_is_err() {
+    for len in HUGE_LENS {
+        let (data, prefix_len) = huge_len_input(len, &[0xAA, 0xBB, 0xCC]);
+        let mut c = Cursor::new(&data);
+        assert!(c.skip_field(WIRE_LEN).is_err(), "len {len}");
+        assert_eq!(c.position(), prefix_len, "len {len}");
+    }
+}
+
+#[test]
+fn read_raw_field_len_huge_len_is_err() {
+    for len in HUGE_LENS {
+        let (data, prefix_len) = huge_len_input(len, &[0xAA, 0xBB, 0xCC]);
+        let mut c = Cursor::new(&data);
+        assert!(c.read_raw_field(WIRE_LEN).is_err(), "len {len}");
+        assert_eq!(c.position(), prefix_len, "len {len}");
+    }
+}
+
+#[test]
+fn read_len_delimited_huge_len_mid_buffer() {
+    // A valid field first, so the bad prefix sits at a nonzero offset.
+    let mut data = Vec::new();
+    encode_bytes_field_always(&mut data, 1, b"ok");
+    let first = data.len();
+    encode_varint(&mut data, u64::MAX);
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_tag().unwrap(), Some((1, WIRE_LEN)));
+    assert_eq!(c.read_len_delimited().unwrap(), b"ok");
+    assert_eq!(c.position(), first);
+    assert!(c.read_len_delimited().is_err());
+    assert_eq!(c.position(), data.len());
+}
+
+#[test]
+fn read_len_delimited_exact_fit_and_empty_at_eof() {
+    let data = [0x02, 0xAA, 0xBB, 0x00];
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_len_delimited().unwrap(), &[0xAA, 0xBB]);
+    // Zero-length payload whose prefix is the last byte.
+    assert_eq!(c.read_len_delimited().unwrap(), &[] as &[u8]);
+    assert!(c.is_empty());
+    // Nonempty payload ending exactly at EOF.
+    let data = [0x02, 0xAA, 0xBB];
+    let mut c = Cursor::new(&data);
+    assert_eq!(c.read_len_delimited().unwrap(), &[0xAA, 0xBB]);
+    assert!(c.is_empty());
+    // Length one past the end fails without consuming the payload.
+    let data = [0x03, 0xAA, 0xBB];
+    let mut c = Cursor::new(&data);
+    assert!(c.read_len_delimited().is_err());
+    assert_eq!(c.position(), 1);
+}
+
+#[test]
+fn fixed_width_short_at_offset_leaves_cursor() {
+    // Three bytes after a one-byte varint: too short for fixed32 and fixed64.
+    let data = [0x01, 0xAA, 0xBB, 0xCC];
+    for width in [4usize, 8] {
+        let mut c = Cursor::new(&data);
+        c.read_varint().unwrap();
+        let err = if width == 4 {
+            c.read_fixed32().is_err()
+        } else {
+            c.read_fixed64().is_err()
+        };
+        assert!(err, "fixed{}", width * 8);
+        assert_eq!(c.position(), 1);
+        let wire = if width == 4 { WIRE_32BIT } else { WIRE_64BIT };
+        assert!(c.skip_field(wire).is_err());
+        assert_eq!(c.position(), 1);
+        assert!(c.read_raw_field(wire).is_err());
+        assert_eq!(c.position(), 1);
+    }
+    // Exact fit at an offset succeeds and reaches the end.
+    let data = [0x01, 0x78, 0x56, 0x34, 0x12];
+    let mut c = Cursor::new(&data);
+    c.read_varint().unwrap();
+    assert_eq!(c.read_fixed32().unwrap(), 0x1234_5678);
+    assert!(c.is_empty());
+}
+
 #[test]
 fn read_raw_field_truncated_len_prefix() {
     // Continuation byte in length varint with no terminator

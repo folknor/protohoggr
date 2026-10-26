@@ -57,6 +57,12 @@ pub const WIRE_32BIT: u32 = 5;
 #[derive(Clone, Debug)]
 pub struct Cursor<'a> {
     data: &'a [u8],
+    /// Invariant: `pos <= data.len()`. [`rest`](Cursor::rest) relies on it
+    /// for soundness, so every write to `pos` must preserve it. Each one
+    /// advances past bytes it has just bounds-checked, except in
+    /// `read_varint_unchecked`, whose caller contract forbids reading past
+    /// the end (a violation is an out-of-bounds read, already UB, before
+    /// `pos` could pass `data.len()`).
     pos: usize,
 }
 
@@ -87,6 +93,45 @@ impl<'a> Cursor<'a> {
     #[must_use]
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// The unread bytes, `data[pos..]`, without a bounds check.
+    ///
+    /// The unchecked slice is not about skipping a check for its own sake:
+    /// it tells the optimizer `pos <= data.len()`, which it cannot derive.
+    /// Without it, a late-2026 nightly on x86-64 compiled the bounded reads to
+    /// two comparisons (`pos <= len` and `len - pos >= n`) where one
+    /// suffices, making fixed-width skips costlier than the `pos + n` form
+    /// they replaced.
+    #[inline]
+    fn rest(&self) -> &'a [u8] {
+        // SAFETY: `pos <= data.len()` is a field invariant; see `pos`.
+        unsafe { self.data.get_unchecked(self.pos..) }
+    }
+
+    /// Consume and return the next `n` bytes, or `None` (cursor unchanged)
+    /// if fewer than `n` remain.
+    ///
+    /// Every length- and width-bounded read goes through this or
+    /// [`take_array`](Self::take_array). The bound is a comparison against
+    /// the remaining length, never `pos + n`: `n` can come straight off the
+    /// wire (a length prefix up to `u64::MAX`), and an addition there can
+    /// wrap past the check. Once the comparison passes,
+    /// `pos + n <= data.len()`, so the advance cannot overflow and keeps the
+    /// `pos` invariant.
+    #[inline]
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let bytes = self.rest().get(..n)?;
+        self.pos += n;
+        Some(bytes)
+    }
+
+    /// Fixed-width form of [`take`](Self::take).
+    #[inline]
+    fn take_array<const N: usize>(&mut self) -> Option<&'a [u8; N]> {
+        let bytes = self.rest().first_chunk::<N>()?;
+        self.pos += N;
+        Some(bytes)
     }
 
     /// Read a varint (LEB128). Fast path for single-byte values.
@@ -229,29 +274,19 @@ impl<'a> Cursor<'a> {
     /// Read a little-endian 32-bit fixed-width value.
     #[inline]
     pub fn read_fixed32(&mut self) -> WireResult<u32> {
-        if self.pos + 4 > self.data.len() {
-            return Err(wire_error("unexpected end of input reading fixed32"));
+        match self.take_array() {
+            Some(bytes) => Ok(u32::from_le_bytes(*bytes)),
+            None => Err(wire_error("unexpected end of input reading fixed32")),
         }
-        let bytes: [u8; 4] = [
-            self.data[self.pos],
-            self.data[self.pos + 1],
-            self.data[self.pos + 2],
-            self.data[self.pos + 3],
-        ];
-        self.pos += 4;
-        Ok(u32::from_le_bytes(bytes))
     }
 
     /// Read a little-endian 64-bit fixed-width value.
     #[inline]
     pub fn read_fixed64(&mut self) -> WireResult<u64> {
-        if self.pos + 8 > self.data.len() {
-            return Err(wire_error("unexpected end of input reading fixed64"));
+        match self.take_array() {
+            Some(bytes) => Ok(u64::from_le_bytes(*bytes)),
+            None => Err(wire_error("unexpected end of input reading fixed64")),
         }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&self.data[self.pos..self.pos + 8]);
-        self.pos += 8;
-        Ok(u64::from_le_bytes(bytes))
     }
 
     /// Read a little-endian `float` (32-bit IEEE 754).
@@ -286,16 +321,20 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read a length-delimited field, returning the sub-slice.
+    ///
+    /// A length prefix larger than the remaining input - including one that
+    /// does not fit in `usize` - is an `Err`. The prefix varint has been
+    /// consumed by then; the payload has not.
     #[inline]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn read_len_delimited(&mut self) -> WireResult<&'a [u8]> {
-        let len = self.read_varint()? as usize;
-        if self.pos + len > self.data.len() {
-            return Err(wire_error("length-delimited field extends past end"));
-        }
-        let slice = &self.data[self.pos..self.pos + len];
-        self.pos += len;
-        Ok(slice)
+        let len = self.read_varint()?;
+        // Narrow with `try_from`, never `as`: on a 32-bit target `as` would
+        // turn a length of 2^32 + 3 into 3 and decoding would continue
+        // desynchronized instead of failing.
+        usize::try_from(len)
+            .ok()
+            .and_then(|len| self.take(len))
+            .ok_or_else(|| wire_error("length-delimited field extends past end"))
     }
 
     /// Skip a varint by scanning for the terminating byte (MSB=0)
@@ -341,19 +380,17 @@ impl<'a> Cursor<'a> {
                 self.skip_varint()?;
             }
             WIRE_64BIT => {
-                if self.pos + 8 > self.data.len() {
+                if self.take_array::<8>().is_none() {
                     return Err(wire_error("unexpected end of input skipping 64-bit"));
                 }
-                self.pos += 8;
             }
             WIRE_LEN => {
                 self.read_len_delimited()?;
             }
             WIRE_32BIT => {
-                if self.pos + 4 > self.data.len() {
+                if self.take_array::<4>().is_none() {
                     return Err(wire_error("unexpected end of input skipping 32-bit"));
                 }
-                self.pos += 4;
             }
             _ => return Err(wire_error("unknown wire type")),
         }
